@@ -2,7 +2,7 @@ name: Build Optimized Leaf 26.3 Fork
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "perf-stage-2" ]
     paths:
       - "build-tools/**"
       - ".github/workflows/build-fork.yml"
