@@ -1566,4 +1566,162 @@ patch_kd_linear("leaf-server/src/main/java/org/dreeam/leaf/util/KDTree3D.java", 
 
 print("Stage 6: adaptive small-player spatial lookup optimization applied.")
 
+
+# 19) Async pathfinding correctness (Leaf PR #921 concepts ported to 26.3):
+#     - never force pending POI path calculations onto the server thread
+#     - invalidate stale async results when behavior memories change
+#     - revalidate POI ownership/type after asynchronous calculation completes
+acquire_poi = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/behavior/AcquirePoi.java"
+
+replace_once(
+    acquire_poi,
+    """        if (!body.getBrain().checkMemory(memoryToValidate, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
+            return false;
+        }
+        if (memoryToValidate != memoryToAcquire) {
+            if (!body.getBrain().checkMemory(memoryToAcquire, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
+                return false;
+            }
+        }
+        RandomSource random = level.getRandom();
+        if (pending != null && stateSet != null) {
+            pending.process();
+            processPath(poiType, onPoiAcquisitionEvent, batchCache, level, body, memoryToAcquire, timestamp, level.getPoiManager(), stateSet, pending, random);
+            pending = null;
+            stateSet = null;
+        }
+
+        if (onlyIfAdult && body.isBaby()) {
+            return false;
+        }""",
+    """        if (!body.getBrain().checkMemory(memoryToValidate, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
+            pending = null;
+            stateSet = null;
+            return false;
+        }
+        if (memoryToValidate != memoryToAcquire) {
+            if (!body.getBrain().checkMemory(memoryToAcquire, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
+                pending = null;
+                stateSet = null;
+                return false;
+            }
+        }
+
+        if (onlyIfAdult && body.isBaby()) {
+            pending = null;
+            stateSet = null;
+            return false;
+        }
+
+        RandomSource random = level.getRandom();
+        if (pending != null && stateSet != null) {
+            // Do not turn queue pressure into an MSPT spike by processing this path synchronously.
+            if (!pending.isProcessed()) {
+                return false;
+            }
+            processPath(poiType, onPoiAcquisitionEvent, batchCache, level, body, memoryToAcquire, timestamp, level.getPoiManager(), stateSet, pending, random, validPoi);
+            pending = null;
+            stateSet = null;
+            return true;
+        }""",
+    "async POI wait without server-thread path execution",
+)
+
+# Update the normal completed-path call to carry the validator as well.
+data=read(acquire_poi)
+old="""            processPath(poiType, onPoiAcquisitionEvent, batchCache, level, body, memoryToAcquire, timestamp, poiManager, poiPositions, path, random);"""
+new="""            processPath(poiType, onPoiAcquisitionEvent, batchCache, level, body, memoryToAcquire, timestamp, poiManager, poiPositions, path, random, validPoi);"""
+count=data.count(old)
+if count != 1:
+    raise RuntimeError(f"AcquirePoi direct processPath call: expected 1 match, got {count}")
+data=data.replace(old,new,1)
+write(acquire_poi,data)
+print("[ok] async POI validator propagation")
+
+replace_once(
+    acquire_poi,
+    """                                    final Set<Pair<Holder<PoiType>, BlockPos>> poiPositions,
+                                    final @org.jspecify.annotations.Nullable Path path,
+                                    final RandomSource random) {
+        if (path != null && path.canReach()) {
+            BlockPos targetPos = path.getTarget();
+            poiManager.getType(targetPos).ifPresent(type -> {
+                poiManager.take(poiType, (t, poiPos) -> poiPos.equals(targetPos), targetPos, 1);
+                walkTarget.getBrain().setMemory(memoryToAcquire, GlobalPos.of(level.dimension(), targetPos));
+                onPoiAcquisitionEvent.ifPresent(event -> level.broadcastEntityEvent(walkTarget, event));
+                batchCache.clear();
+                level.debugSynchronizers().updatePoi(targetPos);
+            });""",
+    """                                    final Set<Pair<Holder<PoiType>, BlockPos>> poiPositions,
+                                    final @org.jspecify.annotations.Nullable Path path,
+                                    final RandomSource random,
+                                    final BiPredicate<ServerLevel, BlockPos> validPoi) {
+        if (path != null && path.canReach()) {
+            BlockPos targetPos = path.getTarget();
+            // World/POI state may have changed while the path was computed off-thread.
+            if (!validPoi.test(level, targetPos)) {
+                return;
+            }
+            poiManager.take(poiType, (t, poiPos) -> poiPos.equals(targetPos), targetPos, 1).ifPresent(acquiredPos -> {
+                walkTarget.getBrain().setMemory(memoryToAcquire, GlobalPos.of(level.dimension(), acquiredPos));
+                onPoiAcquisitionEvent.ifPresent(event -> level.broadcastEntityEvent(walkTarget, event));
+                batchCache.clear();
+                level.debugSynchronizers().updatePoi(acquiredPos);
+            });""",
+    "async POI result revalidation",
+)
+
+home = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/behavior/SetClosestHomeAsWalkTarget.java"
+replace_once(
+    home,
+    """        if (!body.getBrain().checkMemory(MemoryModuleType.WALK_TARGET, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
+            return false;
+        }
+        if (!body.getBrain().checkMemory(MemoryModuleType.HOME, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
+            return false;
+        }
+
+        if (pending != null) {
+            pending.process();
+            processPath(speedModifier, batchCache, lastUpdate, body, level, level.getPoiManager(), stateInt, pending);
+            pending = null;
+        }""",
+    """        if (!body.getBrain().checkMemory(MemoryModuleType.WALK_TARGET, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
+            pending = null;
+            return false;
+        }
+        if (!body.getBrain().checkMemory(MemoryModuleType.HOME, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
+            pending = null;
+            return false;
+        }
+
+        if (pending != null) {
+            if (!pending.isProcessed()) {
+                return false;
+            }
+            processPath(speedModifier, batchCache, lastUpdate, body, level, level.getPoiManager(), stateInt, pending);
+            pending = null;
+            return true;
+        }""",
+    "async home path wait without synchronous processing",
+)
+
+replace_once(
+    home,
+    """            Optional<Holder<PoiType>> type = poiManager.getType(targetPos);
+            if (type.isPresent()) {
+                walkTarget.getBrain().setMemory(MemoryModuleType.WALK_TARGET, new WalkTarget(targetPos, speedModifier, 1));
+                level.debugSynchronizers().updatePoi(targetPos);
+            }""",
+    """            Optional<Holder<PoiType>> type = poiManager.getType(targetPos);
+            // Revalidate after off-thread calculation: the target may no longer be a HOME POI.
+            if (type.isPresent() && type.get().is(PoiTypes.HOME)) {
+                walkTarget.getBrain().setMemory(MemoryModuleType.WALK_TARGET, new WalkTarget(targetPos, speedModifier, 1));
+                level.debugSynchronizers().updatePoi(targetPos);
+            }""",
+    "async home POI result revalidation",
+)
+
+print("Stage 7: async pathfinding POI correctness/p99 fixes applied.")
+
 print("All Warext optimized Leaf 26.3 performance patches applied.")
