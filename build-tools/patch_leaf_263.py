@@ -1840,4 +1840,68 @@ replace_once(
 
 print("Stage 9: shared adaptive multi-core CPU budget applied.")
 
+
+# 22) Async save/compression worker count: draw only from spare shared CPU budget.
+#     Keep resource use at one worker on smaller hosts; allow up to two low-priority workers
+#     when the machine has genuine async headroom, and let them time out when idle.
+budget_file = "leaf-server/src/main/java/org/dreeam/leaf/performance/WarextCpuBudget.java"
+replace_once(
+    budget_file,
+    """    public static int backgroundHeadroom() {
+        return Math.max(0, workerBudget() - pathfindingThreads() - trackerThreads());
+    }""",
+    """    public static int backgroundHeadroom() {
+        return Math.max(0, workerBudget() - pathfindingThreads() - trackerThreads());
+    }
+
+    public static int ioWorkers() {
+        final int override = Integer.getInteger("warext.cpu.io-workers", 0);
+        if (override > 0) {
+            return Math.max(1, Math.min(4, override));
+        }
+
+        final int spare = backgroundHeadroom();
+        if (PROCESSORS >= 12 && spare >= 2) {
+            return 2;
+        }
+        return 1;
+    }""",
+    "shared CPU budget IO worker allocation",
+)
+
+async_save = "leaf-server/src/main/java/org/dreeam/leaf/async/AsyncPlayerDataSaving.java"
+replace_once(
+    async_save,
+    """            IO_POOL = new ThreadPoolExecutor(
+                1,
+                1,
+                0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(),
+                new com.google.common.util.concurrent.ThreadFactoryBuilder()
+                    .setPriority(Thread.NORM_PRIORITY - 2)
+                    .setNameFormat("Warext Leaf IO Thread")
+                    .setUncaughtExceptionHandler(Util::onThreadException)
+                    .build(),
+                new ThreadPoolExecutor.AbortPolicy()
+            );""",
+    """            final int ioWorkers = org.dreeam.leaf.performance.WarextCpuBudget.ioWorkers();
+            final ThreadPoolExecutor executor = new ThreadPoolExecutor(
+                ioWorkers,
+                ioWorkers,
+                30L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(),
+                new com.google.common.util.concurrent.ThreadFactoryBuilder()
+                    .setPriority(Thread.NORM_PRIORITY - 2)
+                    .setNameFormat("Warext Leaf IO Thread-%d")
+                    .setUncaughtExceptionHandler(Util::onThreadException)
+                    .build(),
+                new ThreadPoolExecutor.AbortPolicy()
+            );
+            executor.allowCoreThreadTimeOut(true);
+            IO_POOL = executor;""",
+    "adaptive async save IO workers",
+)
+
+print("Stage 10: adaptive low-priority save/compression workers applied.")
+
 print("All Warext optimized Leaf 26.3 performance patches applied.")
