@@ -2371,4 +2371,55 @@ print("[ok] cached entity encode id")
 
 print("Stage 15: immutable entity encode-id caching applied.")
 
+
+# 28) Async pathfinding burst memory/latency control.
+# Evaluators are checked out before tasks enter the executor queue, so an oversized queue can
+# temporarily create hundreds/thousands of heavyweight evaluator instances. Keep enough backlog
+# for throughput without retaining huge stale bursts.
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/async/AsyncPathfinding.java",
+    """        if (asyncPathfindingQueueSize <= 0) {
+            asyncPathfindingQueueSize = asyncPathfindingMaxThreads * 256;
+        }""",
+    """        if (asyncPathfindingQueueSize <= 0) {
+            asyncPathfindingQueueSize = Math.max(
+                128,
+                Math.min(512, asyncPathfindingMaxThreads * 96)
+            );
+        }""",
+    "bounded adaptive pathfinding queue",
+)
+
+node_cache = "leaf-server/src/main/java/org/dreeam/leaf/async/path/NodeEvaluatorCache.java"
+replace_once(
+    node_cache,
+    """    private static final ConcurrentHashMap<PoolKey, ConcurrentLinkedQueue<NodeEvaluator>> NODE_EVALUATORS = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<IdentityKey<NodeEvaluator>, ConcurrentLinkedQueue<NodeEvaluator>> NODE_EVALUATOR_TO_POOL = new ConcurrentHashMap<>();""",
+    """    private static final ConcurrentHashMap<PoolKey, ConcurrentLinkedQueue<NodeEvaluator>> NODE_EVALUATORS = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<IdentityKey<NodeEvaluator>, ConcurrentLinkedQueue<NodeEvaluator>> NODE_EVALUATOR_TO_POOL = new ConcurrentHashMap<>();
+
+    private static int retainedPoolLimit() {
+        final int configured = Integer.getInteger("warext.pathfinding.evaluator-pool-cap", 0);
+        if (configured > 0) {
+            return Math.max(1, Math.min(128, configured));
+        }
+        final int threads = Math.max(1, org.dreeam.leaf.config.modules.async.AsyncPathfinding.asyncPathfindingMaxThreads);
+        return Math.max(4, Math.min(32, threads * 2));
+    }""",
+    "pathfinding evaluator retained-pool cap",
+)
+
+replace_once(
+    node_cache,
+    """        Validate.notNull(pool, "NodeEvaluator already returned");
+        pool.offer(nodeEvaluator);""",
+    """        Validate.notNull(pool, "NodeEvaluator already returned");
+        if (pool.size() < retainedPoolLimit()) {
+            pool.offer(nodeEvaluator);
+        }""",
+    "discard excess burst evaluators",
+)
+
+print("Stage 16: pathfinding burst queue and evaluator retention limits applied.")
+
 print("All Warext optimized Leaf 26.3 performance patches applied.")
