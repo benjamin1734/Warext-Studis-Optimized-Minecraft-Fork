@@ -2274,7 +2274,7 @@ public final class WarextPerformanceProfile {
     }
 
     public static boolean asyncTrackerDefault() {
-        return MODE == Mode.EXTREME && Runtime.getRuntime().availableProcessors() >= 6;
+        return MODE == Mode.EXTREME && Runtime.getRuntime().availableProcessors() >= 4;
     }
 
     public static int trackerMinEntitiesPerTask() {
