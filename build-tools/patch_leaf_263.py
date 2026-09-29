@@ -248,4 +248,333 @@ insert_after_once(
     "player.dat compression failure safety",
 )
 
+
+# 8) Chunk lookup: avoid full-table shrink rehashes on normal unload ticks.
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/world/ChunkCache.java",
+    """        if (n > MIN_N && size < maxFill / 4 && n > it.unimi.dsi.fastutil.Hash.DEFAULT_INITIAL_SIZE) {
+            rehash(n / 2);
+        }
+        return oldValue;""",
+    """        // Warext: do not shrink during ordinary chunk removal. A full rehash here can
+        // create a large p99 MSPT spike after exploration/mass chunk unload.
+        return oldValue;""",
+    "chunk cache p99-safe removal",
+)
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/world/ChunkCache.java",
+    """        size--;
+        if (n > MIN_N && size < maxFill / 4 && n > it.unimi.dsi.fastutil.Hash.DEFAULT_INITIAL_SIZE) rehash(n / 2);
+        return oldValue;""",
+    """        size--;
+        // Warext: keep capacity on hot-path removals; clear() still releases references.
+        return oldValue;""",
+    "chunk cache p99-safe null-key removal",
+)
+
+# 9) KD trees: allow reusable over-capacity buffers while only indexing active players.
+for rel, dims in [
+    ("leaf-server/src/main/java/org/dreeam/leaf/util/KDTree2D.java", 2),
+    ("leaf-server/src/main/java/org/dreeam/leaf/util/KDTree3D.java", 3),
+]:
+    data = read(rel)
+    old_sig = "    public void build(final double[][] coords, final int[] indices) {"
+    if data.count(old_sig) != 1:
+        raise RuntimeError(f"KD build overload: expected one signature in {rel}")
+    data = data.replace(
+        old_sig,
+        """    public void build(final double[][] coords, final int[] indices) {
+        build(coords, indices, indices.length);
+    }
+
+    public void build(final double[][] coords, final int[] indices, final int length) {""",
+        1,
+    )
+    data = data.replace(
+        f"        if (indices.length == 0 || coords.length != {dims}) {{",
+        f"        if (length == 0 || coords.length != {dims}) {{",
+        1,
+    )
+    data = data.replace(
+        "        for (int i = 0; i < indices.length; i++) {",
+        "        if (length < 0 || length > indices.length) throw new IllegalArgumentException(\"Invalid KD-tree length\");\n        for (int i = 0; i < length; i++) {",
+        1,
+    )
+    data = data.replace(
+        "        stack[st++] = new Node(SENTINEL, false, 0, indices.length, 0);",
+        "        stack[st++] = new Node(SENTINEL, false, 0, length, 0);",
+        1,
+    )
+    data = data.replace(
+        "        ensureSearch(indices.length, nodeLen);",
+        "        ensureSearch(length, nodeLen);",
+        1,
+    )
+    write(rel, data)
+    print(f"[ok] KDTree{dims}D active-length build")
+
+# 10) Entity activation: reuse player/range/index buffers instead of allocating them every world tick.
+entity_activation = "leaf-server/src/main/java/org/dreeam/leaf/world/EntityActivation.java"
+replace_once(
+    entity_activation,
+    """    private final KDTree2D kdTree2 = new KDTree2D();
+    private final KDTree3D kdTree3 = new KDTree3D();""",
+    """    private final KDTree2D kdTree2 = new KDTree2D();
+    private final KDTree3D kdTree3 = new KDTree3D();
+    private ServerPlayer[] playerBuffer = EMPTY_PLAYERS;
+    private double[] playerX = new double[0];
+    private double[] playerY = new double[0];
+    private double[] playerZ = new double[0];
+    private int[] playerIndices = new int[0];
+    private final double[][] kd2Coords = new double[2][];
+    private final double[][] kd3Coords = new double[3][];
+    private final double[] activationRanges = new double[ACTIVATION_TYPES.length];
+    private int lastPlayerSize;
+    private double lastActivationDistanceMod = Double.NaN;
+    private double cachedActivationScale = 1.0;
+
+    private void ensurePlayerCapacity(final int required) {
+        if (this.playerBuffer.length >= required) {
+            return;
+        }
+        int capacity = Math.max(8, this.playerBuffer.length);
+        while (capacity < required) {
+            capacity <<= 1;
+        }
+        this.playerBuffer = new ServerPlayer[capacity];
+        this.playerX = new double[capacity];
+        this.playerY = new double[capacity];
+        this.playerZ = new double[capacity];
+        this.playerIndices = new int[capacity];
+        this.kd2Coords[0] = this.playerX;
+        this.kd2Coords[1] = this.playerZ;
+        this.kd3Coords[0] = this.playerX;
+        this.kd3Coords[1] = this.playerY;
+        this.kd3Coords[2] = this.playerZ;
+    }""",
+    "entity activation reusable buffers",
+)
+
+replace_once(
+    entity_activation,
+    """        final double[] ranges = new double[ACTIVATION_TYPES.length];
+        ranges[ActivationType.WATER.ordinal()] = waterActivationRange;
+        ranges[ActivationType.FLYING_MONSTER.ordinal()] = flyingActivationRange;
+        ranges[ActivationType.VILLAGER.ordinal()] = villagerActivationRange;
+        ranges[ActivationType.MONSTER.ordinal()] = monsterActivationRange;
+        ranges[ActivationType.ANIMAL.ordinal()] = animalActivationRange;
+        ranges[ActivationType.RAIDER.ordinal()] = raiderActivationRange;
+        ranges[ActivationType.MISC.ordinal()] = miscActivationRange;
+        for (int i = 0; i < ranges.length; i++) {
+            if (ranges[i] > 0.0) {
+                ranges[i] = ranges[i] * ranges[i];
+            }
+        }""",
+    """        final double[] ranges = this.activationRanges;
+        ranges[ActivationType.WATER.ordinal()] = waterActivationRange * (double) waterActivationRange;
+        ranges[ActivationType.FLYING_MONSTER.ordinal()] = flyingActivationRange * (double) flyingActivationRange;
+        ranges[ActivationType.VILLAGER.ordinal()] = villagerActivationRange * (double) villagerActivationRange;
+        ranges[ActivationType.MONSTER.ordinal()] = monsterActivationRange * (double) monsterActivationRange;
+        ranges[ActivationType.ANIMAL.ordinal()] = animalActivationRange * (double) animalActivationRange;
+        ranges[ActivationType.RAIDER.ordinal()] = raiderActivationRange * (double) raiderActivationRange;
+        ranges[ActivationType.MISC.ordinal()] = miscActivationRange * (double) miscActivationRange;""",
+    "entity activation range allocation removal",
+)
+
+replace_once(
+    entity_activation,
+    """        int playerSize = 0;
+        final ServerPlayer[] players = world.players().toArray(EMPTY_PLAYERS);
+        final double[] pxl = new double[players.length];
+        final double[] pyl = new double[players.length];
+        final double[] pzl = new double[players.length];
+        for (int i = 0; i < players.length; i++) {
+            final ServerPlayer p = players[i];
+            p.activatedTick = currentTick;
+            if (world.spigotConfig.ignoreSpectatorActivation && p.isSpectator()) {
+                continue;
+            }
+            if (!world.purpurConfig.idleTimeoutTickNearbyEntities && p.isAfk()) {
+                continue; // Purpur - AFK API
+            }
+            players[playerSize] = p;
+            pxl[playerSize] = p.getX();
+            pyl[playerSize] = p.getY();
+            pzl[playerSize] = p.getZ();
+            playerSize++;
+        }""",
+    """        int playerSize = 0;
+        final java.util.List<ServerPlayer> worldPlayers = world.players();
+        ensurePlayerCapacity(worldPlayers.size());
+        final ServerPlayer[] players = this.playerBuffer;
+        final double[] pxl = this.playerX;
+        final double[] pyl = this.playerY;
+        final double[] pzl = this.playerZ;
+        for (int i = 0, worldPlayerCount = worldPlayers.size(); i < worldPlayerCount; i++) {
+            final ServerPlayer p = worldPlayers.get(i);
+            p.activatedTick = currentTick;
+            if (world.spigotConfig.ignoreSpectatorActivation && p.isSpectator()) {
+                continue;
+            }
+            if (!world.purpurConfig.idleTimeoutTickNearbyEntities && p.isAfk()) {
+                continue; // Purpur - AFK API
+            }
+            players[playerSize] = p;
+            pxl[playerSize] = p.getX();
+            pyl[playerSize] = p.getY();
+            pzl[playerSize] = p.getZ();
+            playerSize++;
+        }
+        if (playerSize < this.lastPlayerSize) {
+            java.util.Arrays.fill(players, playerSize, this.lastPlayerSize, null);
+        }
+        this.lastPlayerSize = playerSize;""",
+    "entity activation player snapshot reuse",
+)
+
+replace_once(
+    entity_activation,
+    """        final int[] indices = new int[playerSize];
+        kdTree2.build(new double[][]{pxl, pzl}, indices);
+        if (dab) kdTree3.build(new double[][]{pxl, pyl, pzl}, indices);""",
+    """        final int[] indices = this.playerIndices;
+        kdTree2.build(this.kd2Coords, indices, playerSize);
+        if (dab) kdTree3.build(this.kd3Coords, indices, playerSize);""",
+    "entity activation KD input reuse",
+)
+
+replace_once(
+    entity_activation,
+    """                DynamicActivationofBrain.startDistanceSquared,
+                Math.pow(2.0, -DynamicActivationofBrain.activationDistanceMod),
+                DynamicActivationofBrain.maximumActivationPrio""",
+    """                DynamicActivationofBrain.startDistanceSquared,
+                this.activationScale(),
+                DynamicActivationofBrain.maximumActivationPrio""",
+    "entity activation cached DAB scale",
+)
+
+replace_once(
+    entity_activation,
+    """    private static void activateEntities(int size, Object[] entities, boolean tickMarkers, long currentTick, double[] ranges, KDTree2D kdTree2, boolean dab, boolean dontEnableIfInWater, KDTree3D kdTree3, double startSq, double scale, int maxPriority) {""",
+    """    private double activationScale() {
+        final double mod = DynamicActivationofBrain.activationDistanceMod;
+        if (Double.doubleToLongBits(mod) != Double.doubleToLongBits(this.lastActivationDistanceMod)) {
+            this.lastActivationDistanceMod = mod;
+            this.cachedActivationScale = Math.pow(2.0, -mod);
+        }
+        return this.cachedActivationScale;
+    }
+
+    private static void activateEntities(int size, Object[] entities, boolean tickMarkers, long currentTick, double[] ranges, KDTree2D kdTree2, boolean dab, boolean dontEnableIfInWater, KDTree3D kdTree3, double startSq, double scale, int maxPriority) {""",
+    "entity activation DAB scale cache helper",
+)
+
+# 11) Move NBT compression off the tick thread; the worker writes directly to the temp file.
+level_storage = "leaf-server/src/minecraft/java/net/minecraft/world/level/storage/LevelStorageSource.java"
+replace_once(
+    level_storage,
+    """            // Leaf start - Async playerdata saving
+            // Save level.dat asynchronously
+            var nbtBytes = new it.unimi.dsi.fastutil.io.FastByteArrayOutputStream(65536);
+            try {
+                NbtIo.writeCompressed(root, nbtBytes);
+            } catch (Exception e) {
+                LevelStorageSource.LOGGER.error("Failed to encode level {}", worldDir, e);
+                return;
+            }
+            org.dreeam.leaf.async.AsyncPlayerDataSaving.submit(() -> {
+                try {
+                    Path dataFile = Files.createTempFile(worldDir, "level", ".dat");
+                    org.apache.commons.io.FileUtils.writeByteArrayToFile(dataFile.toFile(), nbtBytes.array, 0, nbtBytes.length, false);
+                    Path oldDataFile = this.levelDirectory.oldDataFile();
+                    Path currentFile = this.levelDirectory.dataFile();
+                    Util.safeReplaceFile(currentFile, dataFile, oldDataFile);
+                } catch (Exception e) {
+                    LevelStorageSource.LOGGER.error("Failed to save level {}", worldDir, e);
+                }
+            });
+            // Leaf end - Async playerdata saving""",
+    """            // Warext - compression and filesystem I/O both happen off the tick thread.
+            org.dreeam.leaf.async.AsyncPlayerDataSaving.submit(() -> {
+                Path dataFile = null;
+                try {
+                    dataFile = Files.createTempFile(worldDir, "level", ".dat");
+                    NbtIo.writeCompressed(root, dataFile);
+                    Path oldDataFile = this.levelDirectory.oldDataFile();
+                    Path currentFile = this.levelDirectory.dataFile();
+                    Util.safeReplaceFile(currentFile, dataFile, oldDataFile);
+                } catch (Exception e) {
+                    LevelStorageSource.LOGGER.error("Failed to save level {}", worldDir, e);
+                    if (dataFile != null) {
+                        try {
+                            Files.deleteIfExists(dataFile);
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }
+            });""",
+    "async level compression",
+)
+
+player_storage = "leaf-server/src/minecraft/java/net/minecraft/world/level/storage/PlayerDataStorage.java"
+replace_once(
+    player_storage,
+    """        var nbtBytes = new it.unimi.dsi.fastutil.io.FastByteArrayOutputStream(65536);
+        try {
+            NbtIo.writeCompressed(compoundTag, nbtBytes);
+        } catch (Exception exception) {
+            LOGGER.warn("Failed to encode player data for {}", stringId, exception);
+            return;
+        }
+        lockFor(uniqueId, playerName);
+        synchronized (PlayerDataStorage.this) {
+            org.dreeam.leaf.async.AsyncPlayerDataSaving.submit(() -> {
+                try {
+                    Path playerDirPath = this.playerDir.toPath();
+                    Path tmpFile = Files.createTempFile(playerDirPath, stringId + "-", ".dat");
+                    org.apache.commons.io.FileUtils.writeByteArrayToFile(tmpFile.toFile(), nbtBytes.array, 0, nbtBytes.length, false);
+                    Path realFile = playerDirPath.resolve(stringId + ".dat");
+                    Path oldFile = playerDirPath.resolve(stringId + ".dat_old");
+                    Util.safeReplaceFile(realFile, tmpFile, oldFile);
+                } catch (Exception var7) {
+                    LOGGER.warn("Failed to save player data for {}", playerName, var7);
+                } finally {
+                    synchronized (PlayerDataStorage.this) {
+                        savingLocks.remove(uniqueId);
+                    }
+                }
+            }).ifPresent(future -> savingLocks.put(uniqueId, future));
+        }""",
+    """        lockFor(uniqueId, playerName);
+        synchronized (PlayerDataStorage.this) {
+            org.dreeam.leaf.async.AsyncPlayerDataSaving.submit(() -> {
+                Path tmpFile = null;
+                try {
+                    Path playerDirPath = this.playerDir.toPath();
+                    tmpFile = Files.createTempFile(playerDirPath, stringId + "-", ".dat");
+                    NbtIo.writeCompressed(compoundTag, tmpFile);
+                    Path realFile = playerDirPath.resolve(stringId + ".dat");
+                    Path oldFile = playerDirPath.resolve(stringId + ".dat_old");
+                    Util.safeReplaceFile(realFile, tmpFile, oldFile);
+                } catch (Exception var7) {
+                    LOGGER.warn("Failed to save player data for {}", playerName, var7);
+                    if (tmpFile != null) {
+                        try {
+                            Files.deleteIfExists(tmpFile);
+                        } catch (Exception ignored) {
+                        }
+                    }
+                } finally {
+                    synchronized (PlayerDataStorage.this) {
+                        savingLocks.remove(uniqueId);
+                    }
+                }
+            }).ifPresent(future -> savingLocks.put(uniqueId, future));
+        }""",
+    "async player compression",
+)
+
+print("Stage 2: p99/allocation/I-O optimizations applied.")
+
 print("All Warext optimized Leaf 26.3 performance patches applied.")
