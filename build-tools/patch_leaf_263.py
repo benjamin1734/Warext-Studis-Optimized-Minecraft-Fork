@@ -1747,4 +1747,267 @@ replace_once(
 
 print("Stage 8: primitive tracker interpolation accumulation applied.")
 
+
+# 21) Shared Warext CPU budget: pathfinding/tracker auto mode draw from the same conservative
+#     processor budget instead of independently scaling to the machine size.
+cpu_budget = """package org.dreeam.leaf.performance;
+
+public final class WarextCpuBudget {
+
+    private static final int PROCESSORS = Math.max(1, Runtime.getRuntime().availableProcessors());
+
+    private WarextCpuBudget() {
+    }
+
+    public static int processors() {
+        return PROCESSORS;
+    }
+
+    public static int reservedCores() {
+        final int property = Integer.getInteger("warext.cpu.reserve", -1);
+        if (property >= 0) {
+            return Math.min(property, Math.max(0, PROCESSORS - 1));
+        }
+        if (PROCESSORS >= 24) return 5;
+        if (PROCESSORS >= 16) return 4;
+        if (PROCESSORS >= 8) return 2;
+        return 1;
+    }
+
+    public static int workerBudget() {
+        return Math.max(1, PROCESSORS - reservedCores());
+    }
+
+    public static int pathfindingThreads() {
+        final int override = Integer.getInteger("warext.cpu.pathfinding-threads", 0);
+        if (override > 0) return Math.max(1, override);
+
+        final int budget = workerBudget();
+        return Math.max(1, Math.min(8, (budget * 35 + 99) / 100));
+    }
+
+    public static int trackerThreads() {
+        final int override = Integer.getInteger("warext.cpu.tracker-threads", 0);
+        if (override > 0) return Math.max(1, override);
+
+        final int budget = workerBudget();
+        int path = pathfindingThreads();
+        int tracker = Math.max(1, Math.min(8, (budget * 35 + 99) / 100));
+
+        // Keep automatic path + tracker allocations inside the shared worker budget where possible.
+        if (budget > 1 && path + tracker > budget) {
+            tracker = Math.max(1, budget - path);
+        }
+        return tracker;
+    }
+
+    public static int backgroundHeadroom() {
+        return Math.max(0, workerBudget() - pathfindingThreads() - trackerThreads());
+    }
+}
+"""
+budget_path = root / "leaf-server/src/main/java/org/dreeam/leaf/performance/WarextCpuBudget.java"
+budget_path.parent.mkdir(parents=True, exist_ok=True)
+budget_path.write_text(cpu_budget, encoding="utf-8")
+print("[ok] shared Warext CPU budget")
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/async/AsyncPathfinding.java",
+    """        if (asyncPathfindingMaxThreads <= 0) {
+            final int reservedCores = availableProcessors >= 12 ? 3 : (availableProcessors >= 6 ? 2 : 1);
+            final int workerBudget = Math.max(1, availableProcessors - reservedCores);
+            asyncPathfindingMaxThreads = Math.max(1, Math.min(6, workerBudget / 3));
+        }""",
+    """        if (asyncPathfindingMaxThreads <= 0) {
+            asyncPathfindingMaxThreads = org.dreeam.leaf.performance.WarextCpuBudget.pathfindingThreads();
+        }""",
+    "pathfinding shared CPU budget",
+)
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/async/MultithreadedTracker.java",
+    """        if (threads <= 0) {
+            final int availableProcessors = Runtime.getRuntime().availableProcessors();
+            final int reservedCores = availableProcessors >= 12 ? 3 : (availableProcessors >= 6 ? 2 : 1);
+            final int workerBudget = Math.max(1, availableProcessors - reservedCores);
+            threads = Math.max(1, Math.min(6, workerBudget / 2));
+        }""",
+    """        if (threads <= 0) {
+            threads = org.dreeam.leaf.performance.WarextCpuBudget.trackerThreads();
+        }""",
+    "tracker shared CPU budget",
+)
+
+print("Stage 9: shared adaptive multi-core CPU budget applied.")
+
+
+# 22) Async save/compression worker count: draw only from spare shared CPU budget.
+#     Keep resource use at one worker on smaller hosts; allow up to two low-priority workers
+#     when the machine has genuine async headroom, and let them time out when idle.
+budget_file = "leaf-server/src/main/java/org/dreeam/leaf/performance/WarextCpuBudget.java"
+replace_once(
+    budget_file,
+    """    public static int backgroundHeadroom() {
+        return Math.max(0, workerBudget() - pathfindingThreads() - trackerThreads());
+    }""",
+    """    public static int backgroundHeadroom() {
+        return Math.max(0, workerBudget() - pathfindingThreads() - trackerThreads());
+    }
+
+    public static int ioWorkers() {
+        final int override = Integer.getInteger("warext.cpu.io-workers", 0);
+        if (override > 0) {
+            return Math.max(1, Math.min(4, override));
+        }
+
+        final int spare = backgroundHeadroom();
+        if (PROCESSORS >= 12 && spare >= 2) {
+            return 2;
+        }
+        return 1;
+    }""",
+    "shared CPU budget IO worker allocation",
+)
+
+async_save = "leaf-server/src/main/java/org/dreeam/leaf/async/AsyncPlayerDataSaving.java"
+replace_once(
+    async_save,
+    """            IO_POOL = new ThreadPoolExecutor(
+                1,
+                1,
+                0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(),
+                new com.google.common.util.concurrent.ThreadFactoryBuilder()
+                    .setPriority(Thread.NORM_PRIORITY - 2)
+                    .setNameFormat("Warext Leaf IO Thread")
+                    .setUncaughtExceptionHandler(Util::onThreadException)
+                    .build(),
+                new ThreadPoolExecutor.AbortPolicy()
+            );""",
+    """            final int ioWorkers = org.dreeam.leaf.performance.WarextCpuBudget.ioWorkers();
+            final ThreadPoolExecutor executor = new ThreadPoolExecutor(
+                ioWorkers,
+                ioWorkers,
+                30L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(),
+                new com.google.common.util.concurrent.ThreadFactoryBuilder()
+                    .setPriority(Thread.NORM_PRIORITY - 2)
+                    .setNameFormat("Warext Leaf IO Thread-%d")
+                    .setUncaughtExceptionHandler(Util::onThreadException)
+                    .build(),
+                new ThreadPoolExecutor.AbortPolicy()
+            );
+            executor.allowCoreThreadTimeOut(true);
+            IO_POOL = executor;""",
+    "adaptive async save IO workers",
+)
+
+print("Stage 10: adaptive low-priority save/compression workers applied.")
+
+
+# 23) NodeEvaluator pooling: remove the global synchronized bottleneck while preserving
+#     generator identity and feature isolation. Evaluators may be prepared on one thread and
+#     returned on a worker thread, so a thread-local pool is intentionally not used.
+node_cache_concurrent = """package org.dreeam.leaf.async.path;
+
+import net.minecraft.world.level.pathfinder.BinaryHeap;
+import net.minecraft.world.level.pathfinder.Node;
+import net.minecraft.world.level.pathfinder.NodeEvaluator;
+import org.apache.commons.lang3.Validate;
+
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+
+public final class NodeEvaluatorCache {
+
+    private static final ConcurrentHashMap<PoolKey, ConcurrentLinkedQueue<NodeEvaluator>> NODE_EVALUATORS = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<IdentityKey<NodeEvaluator>, ConcurrentLinkedQueue<NodeEvaluator>> NODE_EVALUATOR_TO_POOL = new ConcurrentHashMap<>();
+
+    public static final ThreadLocal<BinaryHeap> HEAP_LOCAL = ThreadLocal.withInitial(BinaryHeap::new);
+    public static final ThreadLocal<Node[]> NEIGHBORS_LOCAL = ThreadLocal.withInitial(() -> new Node[32]);
+
+    private NodeEvaluatorCache() {
+    }
+
+    public static NodeEvaluator takeNodeEvaluator(final NodeEvaluatorGenerator generator, final NodeEvaluator localNodeEvaluator) {
+        final int features = NodeEvaluatorFeatures.fromNodeEvaluator(localNodeEvaluator);
+        final PoolKey key = new PoolKey(generator, features);
+        final ConcurrentLinkedQueue<NodeEvaluator> pool =
+            NODE_EVALUATORS.computeIfAbsent(key, ignored -> new ConcurrentLinkedQueue<>());
+
+        NodeEvaluator nodeEvaluator = pool.poll();
+        if (nodeEvaluator == null) {
+            nodeEvaluator = generator.generate(NodeEvaluatorFeatures.unpack(features));
+        }
+
+        final ConcurrentLinkedQueue<NodeEvaluator> previous =
+            NODE_EVALUATOR_TO_POOL.put(new IdentityKey<>(nodeEvaluator), pool);
+        Validate.isTrue(previous == null, "NodeEvaluator checked out twice");
+        return nodeEvaluator;
+    }
+
+    public static void returnNodeEvaluator(final NodeEvaluator nodeEvaluator) {
+        final ConcurrentLinkedQueue<NodeEvaluator> pool =
+            NODE_EVALUATOR_TO_POOL.remove(new IdentityKey<>(nodeEvaluator));
+        Validate.notNull(pool, "NodeEvaluator already returned");
+        pool.offer(nodeEvaluator);
+    }
+
+    public static void removeNodeEvaluator(final NodeEvaluator nodeEvaluator) {
+        NODE_EVALUATOR_TO_POOL.remove(new IdentityKey<>(nodeEvaluator));
+    }
+
+    private static final class PoolKey {
+        private final NodeEvaluatorGenerator generator;
+        private final int features;
+        private final int hash;
+
+        private PoolKey(final NodeEvaluatorGenerator generator, final int features) {
+            this.generator = generator;
+            this.features = features;
+            this.hash = 31 * System.identityHashCode(generator) + features;
+        }
+
+        @Override
+        public int hashCode() {
+            return this.hash;
+        }
+
+        @Override
+        public boolean equals(final Object object) {
+            return this == object
+                || object instanceof PoolKey other
+                && this.generator == other.generator
+                && this.features == other.features;
+        }
+    }
+
+    private static final class IdentityKey<T> {
+        private final T value;
+        private final int hash;
+
+        private IdentityKey(final T value) {
+            this.value = value;
+            this.hash = System.identityHashCode(value);
+        }
+
+        @Override
+        public int hashCode() {
+            return this.hash;
+        }
+
+        @Override
+        public boolean equals(final Object object) {
+            return this == object
+                || object instanceof IdentityKey<?> other
+                && this.value == other.value;
+        }
+    }
+}
+"""
+write("leaf-server/src/main/java/org/dreeam/leaf/async/path/NodeEvaluatorCache.java", node_cache_concurrent)
+print("[ok] lock-free concurrent NodeEvaluator pools")
+
+print("Stage 11: concurrent NodeEvaluator pooling applied.")
+
 print("All Warext optimized Leaf 26.3 performance patches applied.")
