@@ -2570,7 +2570,36 @@ replace_once(
 
 print("Stage 17: reusable tracker Future/join arrays applied.")
 
-# 30) Final performance profile layer.
+
+# 30) Light packet ThreadLocal retention cleanup.
+# The reusable ThreadLocal buffers must not retain DataLayer byte[] references after the packet
+# clones them, otherwise a long-lived Netty/server thread can keep chunk-light arrays alive.
+light_packet = "leaf-server/src/minecraft/java/net/minecraft/network/protocol/game/ClientboundLightUpdatePacketData.java"
+replace_once(
+    light_packet,
+    """        for (int i = 0; i < skyCount; i++) {
+            skyUpdates[i] = skyBuffer[i].clone();
+        }""",
+    """        for (int i = 0; i < skyCount; i++) {
+            skyUpdates[i] = skyBuffer[i].clone();
+            skyBuffer[i] = null;
+        }""",
+    "release sky light ThreadLocal buffer refs",
+)
+replace_once(
+    light_packet,
+    """        for (int i = 0; i < blockCount; i++) {
+            blockUpdates[i] = blockBuffer[i].clone();
+        }""",
+    """        for (int i = 0; i < blockCount; i++) {
+            blockUpdates[i] = blockBuffer[i].clone();
+            blockBuffer[i] = null;
+        }""",
+    "release block light ThreadLocal buffer refs",
+)
+print("Stage 18: light packet ThreadLocal retention cleanup applied.")
+
+# 31) Final performance profile layer.
 # Balanced is the default for new configurations; extreme opts into the async entity tracker.
 profile_java = """package org.dreeam.leaf.performance;
 
