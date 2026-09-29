@@ -27,10 +27,15 @@ jobs:
           distribution: zulu
           java-version: "25"
 
-      - name: Clone Leaf 26.3
+      - name: Fetch pinned Leaf 26.3 source
         run: |
-          git clone --branch dev/26.3 --single-branch https://github.com/Winds-Studio/Leaf.git leaf-src
+          UPSTREAM_REF=$(tr -d '[:space:]' < build-tools/UPSTREAM_REF)
+          git init leaf-src
+          git -C leaf-src remote add origin https://github.com/Winds-Studio/Leaf.git
+          git -C leaf-src fetch --depth=1 origin "$UPSTREAM_REF"
+          git -C leaf-src checkout -B dev/26.3 FETCH_HEAD
           git -C leaf-src rev-parse HEAD | tee UPSTREAM_COMMIT.txt
+          test "$(cat UPSTREAM_COMMIT.txt)" = "$UPSTREAM_REF"
 
       - name: Configure Git
         run: |
