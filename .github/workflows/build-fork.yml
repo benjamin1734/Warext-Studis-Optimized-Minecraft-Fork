@@ -2,7 +2,7 @@ name: Build Optimized Leaf 26.3 Fork
 
 on:
   push:
-    branches: [ "main", "perf-stage-2", "perf-stage-3", "perf-stage-4", "perf-stage-5" ]
+    branches: [ "main", "perf-stage-2", "perf-stage-3", "perf-stage-4", "perf-stage-5", "perf-stage-6" ]
     paths:
       - "build-tools/**"
       - ".github/workflows/build-fork.yml"
@@ -56,6 +56,68 @@ jobs:
           sha256sum artifacts/Warext-Studis-Optimized-Leaf-26.3.jar > artifacts/SHA256SUMS.txt
           cp UPSTREAM_COMMIT.txt artifacts/UPSTREAM_COMMIT.txt
           cat artifacts/SHA256SUMS.txt
+
+      - name: Smoke test built server
+        run: |
+          rm -rf smoke-test
+          mkdir -p smoke-test
+          cp artifacts/Warext-Studis-Optimized-Leaf-26.3.jar smoke-test/server.jar
+          cd smoke-test
+          printf 'eula=true\n' > eula.txt
+          cat > server.properties <<'EOF'
+          online-mode=false
+          server-port=25569
+          level-type=minecraft:flat
+          view-distance=2
+          simulation-distance=2
+          spawn-protection=0
+          max-players=1
+          enable-query=false
+          enable-rcon=false
+          EOF
+
+          mkfifo console.pipe
+          exec 3<>console.pipe
+          java -Xms768M -Xmx1024M -jar server.jar nogui <console.pipe >server.log 2>&1 &
+          PID=$!
+          READY=0
+
+          for i in $(seq 1 90); do
+            if grep -q "Done (" server.log; then
+              READY=1
+              break
+            fi
+            if ! kill -0 "$PID" 2>/dev/null; then
+              echo "Server exited before reaching Done"
+              cat server.log
+              exit 1
+            fi
+            sleep 1
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            echo "Server did not reach Done within 90 seconds"
+            cat server.log
+            echo "stop" >&3 || true
+            kill "$PID" 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "stop" >&3
+          for i in $(seq 1 30); do
+            if ! kill -0 "$PID" 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          if kill -0 "$PID" 2>/dev/null; then
+            echo "Server did not stop cleanly"
+            cat server.log
+            kill "$PID" 2>/dev/null || true
+            exit 1
+          fi
+          wait "$PID" || true
+          grep "Done (" server.log | tail -n 1
 
       - name: Publish prerelease JAR
         if: github.ref == 'refs/heads/main'
