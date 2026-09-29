@@ -2230,4 +2230,107 @@ replace_once(
 
 print("Stage 13: precipitation random-tick lookup optimization applied.")
 
+
+# 26) Async path behavior lifecycle correctness:
+#     release stale pending paths when behavior memories invalidate, avoid immediately scheduling
+#     another POI path after consuming a finished async result, and stop waiting on stale walk targets.
+acquire_poi = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/behavior/AcquirePoi.java"
+
+replace_once(
+    acquire_poi,
+    """        if (!body.getBrain().checkMemory(memoryToValidate, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
+            return false;
+        }""",
+    """        if (!body.getBrain().checkMemory(memoryToValidate, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
+            pending = null;
+            stateSet = null;
+            return false;
+        }""",
+    "async POI clears stale pending path on validation-memory change",
+)
+
+replace_once(
+    acquire_poi,
+    """            if (!body.getBrain().checkMemory(memoryToAcquire, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
+                return false;
+            }""",
+    """            if (!body.getBrain().checkMemory(memoryToAcquire, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
+                pending = null;
+                stateSet = null;
+                return false;
+            }""",
+    "async POI clears stale pending path on acquisition-memory change",
+)
+
+replace_once(
+    acquire_poi,
+    """        if (pending != null && stateSet != null) {
+            if (!pending.isProcessed()) return false; // Warext - keep async work off the tick thread
+            processPath(poiType, onPoiAcquisitionEvent, batchCache, level, body, memoryToAcquire, timestamp, level.getPoiManager(), stateSet, pending, random, validPoi);
+            pending = null;
+            stateSet = null;
+        }""",
+    """        if (pending != null && stateSet != null) {
+            if (!pending.isProcessed()) return false; // Warext - keep async work off the tick thread
+            processPath(poiType, onPoiAcquisitionEvent, batchCache, level, body, memoryToAcquire, timestamp, level.getPoiManager(), stateSet, pending, random, validPoi);
+            pending = null;
+            stateSet = null;
+            return true; // Warext - do not schedule a second POI path in the same behavior trigger
+        }""",
+    "async POI avoids duplicate same-tick reschedule",
+)
+
+replace_once(
+    acquire_poi,
+    """        if (onlyIfAdult && body.isBaby()) {
+            return false;
+        }""",
+    """        if (onlyIfAdult && body.isBaby()) {
+            pending = null;
+            stateSet = null;
+            return false;
+        }""",
+    "async POI clears pending path when adult-only behavior becomes invalid",
+)
+
+home = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/behavior/SetClosestHomeAsWalkTarget.java"
+replace_once(
+    home,
+    """        if (!body.getBrain().checkMemory(MemoryModuleType.WALK_TARGET, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
+            return false;
+        }""",
+    """        if (!body.getBrain().checkMemory(MemoryModuleType.WALK_TARGET, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
+            pending = null;
+            return false;
+        }""",
+    "async HOME clears stale pending path when walk target appears",
+)
+
+replace_once(
+    home,
+    """        if (!body.getBrain().checkMemory(MemoryModuleType.HOME, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
+            return false;
+        }""",
+    """        if (!body.getBrain().checkMemory(MemoryModuleType.HOME, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
+            pending = null;
+            return false;
+        }""",
+    "async HOME clears stale pending path when HOME memory appears",
+)
+
+move_sink = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/behavior/MoveToTargetSink.java"
+replace_once(
+    move_sink,
+    """        if (org.dreeam.leaf.config.modules.async.AsyncPathfinding.enabled && !this.finishedProcessing) return true; // Kaiiju - petal - async path processing - wait for processing""",
+    """        if (org.dreeam.leaf.config.modules.async.AsyncPathfinding.enabled && !this.finishedProcessing) {
+            Optional<WalkTarget> pendingTarget = body.getBrain().getMemory(MemoryModuleType.WALK_TARGET);
+            return pendingTarget.isPresent()
+                && !this.reachedTarget(body, pendingTarget.get())
+                && !isWalkTargetSpectator(pendingTarget.get());
+        } // Warext - do not keep a stale async navigation behavior alive""",
+    "async MoveToTargetSink stale-target guard",
+)
+
+print("Stage 14: async path behavior lifecycle cleanup applied.")
+
 print("All Warext optimized Leaf 26.3 performance patches applied.")
