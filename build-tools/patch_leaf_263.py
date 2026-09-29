@@ -1566,4 +1566,185 @@ patch_kd_linear("leaf-server/src/main/java/org/dreeam/leaf/util/KDTree3D.java", 
 
 print("Stage 6: adaptive small-player spatial lookup optimization applied.")
 
+
+# 19) Async pathfinding correctness (Leaf PR #921 concepts ported to 26.3):
+#     - do not force pending POI paths onto the server thread
+#     - revalidate POI state after asynchronous calculation
+acquire_poi = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/behavior/AcquirePoi.java"
+data = read(acquire_poi)
+
+if data.count("pending.process();") != 1:
+    raise RuntimeError(f"AcquirePoi pending.process: expected 1 match, got {data.count('pending.process();')}")
+data = data.replace(
+    "pending.process();",
+    "if (!pending.isProcessed()) return false; // Warext - keep async work off the tick thread",
+    1,
+)
+
+old_pending_call = "processPath(poiType, onPoiAcquisitionEvent, batchCache, level, body, memoryToAcquire, timestamp, level.getPoiManager(), stateSet, pending, random);"
+if data.count(old_pending_call) != 1:
+    raise RuntimeError(f"AcquirePoi pending processPath: expected 1 match, got {data.count(old_pending_call)}")
+data = data.replace(old_pending_call, old_pending_call[:-2] + ", validPoi);", 1)
+
+old_direct_call = "processPath(poiType, onPoiAcquisitionEvent, batchCache, level, body, memoryToAcquire, timestamp, poiManager, poiPositions, path, random);"
+if data.count(old_direct_call) != 1:
+    raise RuntimeError(f"AcquirePoi direct processPath: expected 1 match, got {data.count(old_direct_call)}")
+data = data.replace(old_direct_call, old_direct_call[:-2] + ", validPoi);", 1)
+
+# Add validator parameter only to the extracted processPath method.
+method_pos = data.find("private static void processPath(")
+if method_pos < 0:
+    raise RuntimeError("AcquirePoi processPath method not found")
+sig_end = data.find(") {", method_pos)
+if sig_end < 0:
+    raise RuntimeError("AcquirePoi processPath signature end not found")
+signature = data[method_pos:sig_end]
+needle = "final RandomSource random"
+if needle not in signature:
+    raise RuntimeError("AcquirePoi processPath RandomSource parameter not found")
+signature_new = signature.replace(
+    needle,
+    needle + ",\n                                    final BiPredicate<ServerLevel, BlockPos> validPoi",
+    1,
+)
+data = data[:method_pos] + signature_new + data[sig_end:]
+
+# Revalidate and atomically claim the POI after the async result is ready.
+method_pos = data.find("private static void processPath(")
+method_end = data.find("// Kaiiju end - petal - async path processing", method_pos)
+segment = data[method_pos:method_end]
+old_body = """BlockPos targetPos = path.getTarget();
+            poiManager.getType(targetPos).ifPresent(type -> {
+                poiManager.take(poiType, (t, poiPos) -> poiPos.equals(targetPos), targetPos, 1);
+                walkTarget.getBrain().setMemory(memoryToAcquire, GlobalPos.of(level.dimension(), targetPos));
+                onPoiAcquisitionEvent.ifPresent(event -> level.broadcastEntityEvent(walkTarget, event));
+                batchCache.clear();
+                level.debugSynchronizers().updatePoi(targetPos);
+            });"""
+new_body = """BlockPos targetPos = path.getTarget();
+            if (!validPoi.test(level, targetPos)) return; // Warext - stale async result
+            poiManager.take(poiType, (t, poiPos) -> poiPos.equals(targetPos), targetPos, 1).ifPresent(acquiredPos -> {
+                walkTarget.getBrain().setMemory(memoryToAcquire, GlobalPos.of(level.dimension(), acquiredPos));
+                onPoiAcquisitionEvent.ifPresent(event -> level.broadcastEntityEvent(walkTarget, event));
+                batchCache.clear();
+                level.debugSynchronizers().updatePoi(acquiredPos);
+            });"""
+if segment.count(old_body) != 1:
+    raise RuntimeError(f"AcquirePoi result body: expected 1 match, got {segment.count(old_body)}")
+segment = segment.replace(old_body, new_body, 1)
+data = data[:method_pos] + segment + data[method_end:]
+write(acquire_poi, data)
+print("[ok] async POI nonblocking wait + result revalidation")
+
+home = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/behavior/SetClosestHomeAsWalkTarget.java"
+data = read(home)
+if data.count("pending.process();") != 1:
+    raise RuntimeError(f"Home pending.process: expected 1 match, got {data.count('pending.process();')}")
+data = data.replace(
+    "pending.process();",
+    "if (!pending.isProcessed()) return false; // Warext - keep async work off the tick thread",
+    1,
+)
+
+# Once a pending result is consumed, do not immediately schedule another path in the same behavior trigger.
+pending_call = "processPath(speedModifier, batchCache, lastUpdate, body, level, level.getPoiManager(), stateInt, pending);"
+if data.count(pending_call) != 1:
+    raise RuntimeError(f"Home pending processPath: expected 1 match, got {data.count(pending_call)}")
+data = data.replace(
+    pending_call + "\n            pending = null;",
+    pending_call + "\n            pending = null;\n            return true;",
+    1,
+)
+
+method_pos = data.find("private static void processPath(")
+if method_pos < 0:
+    raise RuntimeError("Home processPath method not found")
+method_end = data.find("// Kaiiju end - petal - async path processing", method_pos)
+segment = data[method_pos:method_end]
+old_type = """Optional<Holder<PoiType>> type = poiManager.getType(targetPos);
+            if (type.isPresent()) {"""
+new_type = """Optional<Holder<PoiType>> type = poiManager.getType(targetPos);
+            if (type.isPresent() && type.get().is(PoiTypes.HOME)) { // Warext - revalidate stale async result"""
+if segment.count(old_type) != 1:
+    raise RuntimeError(f"Home POI validation: expected 1 match, got {segment.count(old_type)}")
+segment = segment.replace(old_type, new_type, 1)
+data = data[:method_pos] + segment + data[method_end:]
+write(home, data)
+print("[ok] async HOME nonblocking wait + result revalidation")
+
+print("Stage 7: async pathfinding POI correctness/p99 fixes applied.")
+
+# 20) Tracker interpolation: accumulate predicted movement in primitives instead of allocating Vec3
+#     on every movement event / merge. Materialize at most one Vec3 when interpolation consumes it.
+tracker_input = """package org.dreeam.leaf.async.tracker;
+
+import net.minecraft.world.phys.Vec3;
+import org.jspecify.annotations.NullMarked;
+
+@NullMarked
+public final class TrackerInput {
+    public Vec3 trackingPosition;
+    private double predictedX;
+    private double predictedY;
+    private double predictedZ;
+    public boolean syncPosition;
+
+    public TrackerInput(final Vec3 trackingPosition, final Vec3 predictedDelta, final boolean syncPosition) {
+        this.trackingPosition = trackingPosition;
+        this.predictedX = predictedDelta.x;
+        this.predictedY = predictedDelta.y;
+        this.predictedZ = predictedDelta.z;
+        this.syncPosition = syncPosition;
+    }
+
+    public void applyPredictedMovement(final Vec3 delta) {
+        this.predictedX += delta.x;
+        this.predictedY += delta.y;
+        this.predictedZ += delta.z;
+    }
+
+    void apply(final TrackerInput v) {
+        this.trackingPosition = v.trackingPosition;
+        this.predictedX += v.predictedX;
+        this.predictedY += v.predictedY;
+        this.predictedZ += v.predictedZ;
+        if (v.syncPosition) {
+            this.syncPosition = true;
+        }
+    }
+
+    public Vec3 consumePredictedDelta() {
+        final double x = this.predictedX;
+        final double y = this.predictedY;
+        final double z = this.predictedZ;
+        this.predictedX = 0.0D;
+        this.predictedY = 0.0D;
+        this.predictedZ = 0.0D;
+        if (x == 0.0D && y == 0.0D && z == 0.0D) {
+            return Vec3.ZERO;
+        }
+        return new Vec3(x, y, z);
+    }
+}
+"""
+write("leaf-server/src/main/java/org/dreeam/leaf/async/tracker/TrackerInput.java", tracker_input)
+print("[ok] primitive tracker predicted-delta accumulator")
+
+replace_once(
+    "leaf-server/src/minecraft/java/net/minecraft/world/entity/SteppedInterpolationTracker.java",
+    """        final Vec3 predictedDelta = input.predictedDelta;
+        if (predictedDelta.lengthSqr() > 1.0E-5F) {
+            this.trackedSteps.replaceAll(step -> step.addDelta(predictedDelta));
+        }
+
+        input.predictedDelta = Vec3.ZERO;""",
+    """        final Vec3 predictedDelta = input.consumePredictedDelta();
+        if (predictedDelta.lengthSqr() > 1.0E-5F) {
+            this.trackedSteps.replaceAll(step -> step.addDelta(predictedDelta));
+        }""",
+    "tracker interpolation primitive delta consumption",
+)
+
+print("Stage 8: primitive tracker interpolation accumulation applied.")
+
 print("All Warext optimized Leaf 26.3 performance patches applied.")
