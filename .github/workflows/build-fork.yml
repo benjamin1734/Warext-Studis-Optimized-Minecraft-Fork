@@ -9,6 +9,10 @@ on:
       - "RELEASE_NOTES.md"
   workflow_dispatch:
 
+concurrency:
+  group: optimized-leaf-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
