@@ -577,4 +577,342 @@ replace_once(
 
 print("Stage 2: p99/allocation/I-O optimizations applied.")
 
+
+# 12) Collision movement: reuse step-up voxel list instead of allocating ArrayList on each stepped collision.
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/world/EntityCollisionCache.java",
+    """public record EntityCollisionCache(
+    ObjectArrayList<VoxelShape> potentialCollisionsVoxel,
+    ObjectArrayList<AABB> potentialCollisionsBB,
+    ObjectArrayList<AABB> entityAABBs
+) {
+    public EntityCollisionCache() {
+        this(new ObjectArrayList<>(), new ObjectArrayList<>(), new ObjectArrayList<>());
+    }
+
+    public void clear() {
+        potentialCollisionsVoxel.clear();
+        potentialCollisionsBB.clear();
+        entityAABBs.clear();
+    }
+}""",
+    """public record EntityCollisionCache(
+    ObjectArrayList<VoxelShape> potentialCollisionsVoxel,
+    ObjectArrayList<AABB> potentialCollisionsBB,
+    ObjectArrayList<AABB> entityAABBs,
+    ObjectArrayList<VoxelShape> stepVoxels
+) {
+    public EntityCollisionCache() {
+        this(new ObjectArrayList<>(), new ObjectArrayList<>(), new ObjectArrayList<>(), new ObjectArrayList<>());
+    }
+
+    public void clear() {
+        potentialCollisionsVoxel.clear();
+        potentialCollisionsBB.clear();
+        entityAABBs.clear();
+        stepVoxels.clear();
+    }
+}""",
+    "collision step voxel reusable buffer",
+)
+replace_once(
+    "leaf-server/src/minecraft/java/net/minecraft/world/entity/Entity.java",
+    """        final List<VoxelShape> stepVoxels = new ArrayList<>();
+        final List<AABB> stepAABBs = entityCollisionCache.entityAABBs();""",
+    """        final List<VoxelShape> stepVoxels = entityCollisionCache.stepVoxels();
+        final List<AABB> stepAABBs = entityCollisionCache.entityAABBs();""",
+    "collision step voxel allocation removal",
+)
+
+# 13) AsyncPath publication/callback correctness: eliminate completion-vs-registration races.
+async_path = "leaf-server/src/main/java/org/dreeam/leaf/async/path/AsyncPath.java"
+replace_once(
+    async_path,
+    """    private boolean ready = false;
+
+    private final ArrayList<Consumer<Path>> postProcessing = new ArrayList<>();""",
+    """    private volatile boolean ready = false;
+    private final Object completionLock = new Object();
+
+    private final ArrayList<Consumer<Path>> postProcessing = new ArrayList<>();""",
+    "async path completion publication",
+)
+replace_once(
+    async_path,
+    """    public void schedulePostProcessing(Consumer<Path> runnable) {
+        if (this.ready) {
+            runnable.accept(this);
+        } else {
+            this.postProcessing.add(runnable);
+        }
+    }""",
+    """    public void schedulePostProcessing(Consumer<Path> runnable) {
+        boolean invokeNow;
+        synchronized (this.completionLock) {
+            if (this.ready) {
+                invokeNow = true;
+            } else {
+                this.postProcessing.add(runnable);
+                invokeNow = false;
+            }
+        }
+        if (invokeNow) {
+            runnable.accept(this);
+        }
+    }""",
+    "async path callback race fix",
+)
+replace_once(
+    async_path,
+    """    private void complete(Path bestPath) {
+        this.nodes = bestPath.nodes;
+        this.target = bestPath.getTarget();
+        this.distToTarget = bestPath.getDistToTarget();
+        this.canReach = bestPath.canReach();
+        Path.DebugData debugData = bestPath.debugData();
+        if (debugData != null) {
+            this.setDebug(debugData.openSet(), debugData.closedSet(), debugData.targetNodes());
+        }
+        this.pathFn = null;
+        this.ready = true;
+        for (Consumer<Path> consumer : this.postProcessing) {
+            consumer.accept(this);
+        }
+        this.postProcessing.clear();
+    }""",
+    """    private void complete(Path bestPath) {
+        final Consumer<Path>[] callbacks;
+        synchronized (this.completionLock) {
+            if (this.ready) {
+                return;
+            }
+            this.nodes = bestPath.nodes;
+            this.target = bestPath.getTarget();
+            this.distToTarget = bestPath.getDistToTarget();
+            this.canReach = bestPath.canReach();
+            Path.DebugData debugData = bestPath.debugData();
+            if (debugData != null) {
+                this.setDebug(debugData.openSet(), debugData.closedSet(), debugData.targetNodes());
+            }
+            this.pathFn = null;
+            this.ready = true;
+            @SuppressWarnings("unchecked")
+            Consumer<Path>[] copied = this.postProcessing.toArray(new Consumer[0]);
+            callbacks = copied;
+            this.postProcessing.clear();
+        }
+        // Never invoke arbitrary navigation callbacks while holding the completion lock.
+        for (Consumer<Path> consumer : callbacks) {
+            consumer.accept(this);
+        }
+    }""",
+    "async path idempotent completion",
+)
+
+# 14) Despawn nearest-player lookup: reuse coordinate/index buffers every tick.
+despawn = "leaf-server/src/main/java/org/dreeam/leaf/world/DespawnMap.java"
+replace_once(
+    despawn,
+    """    private final KDTree3D tree = new KDTree3D();
+    private final double[] hard = new double[CATEGORIES.length];
+    private final double[] sort = new double[CATEGORIES.length];
+    private boolean difficultyIsPeaceful = true;""",
+    """    private final KDTree3D tree = new KDTree3D();
+    private final double[] hard = new double[CATEGORIES.length];
+    private final double[] sort = new double[CATEGORIES.length];
+    private double[] playerX = new double[0];
+    private double[] playerY = new double[0];
+    private double[] playerZ = new double[0];
+    private int[] playerIndices = new int[0];
+    private final double[][] playerCoords = new double[3][];
+    private boolean difficultyIsPeaceful = true;
+
+    private void ensurePlayerCapacity(final int required) {
+        if (this.playerX.length >= required) {
+            return;
+        }
+        int capacity = Math.max(8, this.playerX.length);
+        while (capacity < required) {
+            capacity <<= 1;
+        }
+        this.playerX = new double[capacity];
+        this.playerY = new double[capacity];
+        this.playerZ = new double[capacity];
+        this.playerIndices = new int[capacity];
+        this.playerCoords[0] = this.playerX;
+        this.playerCoords[1] = this.playerY;
+        this.playerCoords[2] = this.playerZ;
+    }""",
+    "despawn reusable player buffers",
+)
+replace_once(
+    despawn,
+    """        final ServerPlayer[] players = world.players().toArray(EMPTY_PLAYERS);
+        final double[] playerX = new double[players.length];
+        final double[] playerY = new double[players.length];
+        final double[] playerZ = new double[players.length];
+        int i = 0;
+        for (int j = 0; j < players.length; j++) {
+            final ServerPlayer p = players[j];
+            if (EntitySelector.PLAYER_AFFECTS_SPAWNING.test(p)) {
+                playerX[i] = p.getX();
+                playerY[i] = p.getY();
+                playerZ[i] = p.getZ();
+                players[i] = p;
+                i++;
+            }
+        }
+        tree.build(new double[][]{playerX, playerY, playerZ}, new int[i]);""",
+    """        final java.util.List<ServerPlayer> players = world.players();
+        ensurePlayerCapacity(players.size());
+        int i = 0;
+        for (int j = 0, playerCount = players.size(); j < playerCount; j++) {
+            final ServerPlayer p = players.get(j);
+            if (EntitySelector.PLAYER_AFFECTS_SPAWNING.test(p)) {
+                this.playerX[i] = p.getX();
+                this.playerY[i] = p.getY();
+                this.playerZ[i] = p.getZ();
+                i++;
+            }
+        }
+        tree.build(this.playerCoords, this.playerIndices, i);""",
+    "despawn per-tick allocation removal",
+)
+
+# 15) Natural-spawn player lookup: reuse player coordinate arrays and avoid toArray/new KD input arrays.
+nature = "leaf-server/src/main/java/org/dreeam/leaf/world/NatureSpawnChunkMap.java"
+replace_once(
+    nature,
+    """    private final LongArrayList[] centersByRadius;
+    private final LongSet set;
+    private final KDTree3D tree;
+    private boolean ready;""",
+    """    private final LongArrayList[] centersByRadius;
+    private final LongSet set;
+    private final KDTree3D tree;
+    private double[] playerX = new double[0];
+    private double[] playerY = new double[0];
+    private double[] playerZ = new double[0];
+    private int[] playerIndices = new int[0];
+    private final double[][] playerCoords = new double[3][];
+    private boolean ready;
+
+    private void ensurePlayerCapacity(final int required) {
+        if (this.playerX.length >= required) {
+            return;
+        }
+        int capacity = Math.max(8, this.playerX.length);
+        while (capacity < required) {
+            capacity <<= 1;
+        }
+        this.playerX = new double[capacity];
+        this.playerY = new double[capacity];
+        this.playerZ = new double[capacity];
+        this.playerIndices = new int[capacity];
+        this.playerCoords[0] = this.playerX;
+        this.playerCoords[1] = this.playerY;
+        this.playerCoords[2] = this.playerZ;
+    }""",
+    "natural spawn reusable player buffers",
+)
+replace_once(
+    nature,
+    """    public void tick(final ServerLevel world, final List<LevelChunk> out) {
+        ServerPlayer[] players = initPlayer(world);
+        for (int index = 0; index < SIZE_RADIUS; index++) {
+            buildBfs(index);
+        }
+        buildKdTree(world.purpurConfig.mobSpawningIgnoreCreativePlayers, players);
+        collectSpawningChunks(world.getChunkSource().fullChunksNonSync, this.set, out);
+        this.ready = true;
+    }""",
+    """    public void tick(final ServerLevel world, final List<LevelChunk> out) {
+        java.util.List<ServerPlayer> players = world.players();
+        initPlayer(players);
+        for (int index = 0; index < SIZE_RADIUS; index++) {
+            buildBfs(index);
+        }
+        buildKdTree(world.purpurConfig.mobSpawningIgnoreCreativePlayers, players);
+        collectSpawningChunks(world.getChunkSource().fullChunksNonSync, this.set, out);
+        this.ready = true;
+    }""",
+    "natural spawn avoid player array snapshot",
+)
+replace_once(
+    nature,
+    """    private ServerPlayer[] initPlayer(final ServerLevel world) {
+        ServerPlayer[] players = world.players().toArray(EMPTY_PLAYERS);
+        for (final ServerPlayer player : players) {
+            if (player.isSpectator()) {
+                continue;
+            }
+            PlayerNaturallySpawnCreaturesEvent event = player.playerNaturallySpawnedEvent;
+            if (event == null || event.isCancelled()) {
+                continue;
+            }
+            int range = event.getSpawnRadius();
+            if (range > MAX_RADIUS) {
+                range = MAX_RADIUS;
+            } else if (range < 0) {
+                continue;
+            }
+            this.centersByRadius[range].add(player.chunkPosition().longKey());
+        }
+        return players;
+    }
+
+    private void buildKdTree(final boolean ignoreCreativePlayers, final ServerPlayer[] players) {
+        double[] pxl = new double[players.length];
+        double[] pyl = new double[players.length];
+        double[] pzl = new double[players.length];
+        int i = 0;
+        for (final ServerPlayer p : players) {
+            if (!p.isSpectator() && !(ignoreCreativePlayers && p.isCreative())) {
+                pxl[i] = p.getX();
+                pyl[i] = p.getY();
+                pzl[i] = p.getZ();
+                i++;
+            }
+        }
+        this.tree.build(new double[][]{pxl, pyl, pzl}, new int[i]);
+    }""",
+    """    private void initPlayer(final java.util.List<ServerPlayer> players) {
+        for (int i = 0, playerCount = players.size(); i < playerCount; i++) {
+            final ServerPlayer player = players.get(i);
+            if (player.isSpectator()) {
+                continue;
+            }
+            PlayerNaturallySpawnCreaturesEvent event = player.playerNaturallySpawnedEvent;
+            if (event == null || event.isCancelled()) {
+                continue;
+            }
+            int range = event.getSpawnRadius();
+            if (range > MAX_RADIUS) {
+                range = MAX_RADIUS;
+            } else if (range < 0) {
+                continue;
+            }
+            this.centersByRadius[range].add(player.chunkPosition().longKey());
+        }
+    }
+
+    private void buildKdTree(final boolean ignoreCreativePlayers, final java.util.List<ServerPlayer> players) {
+        ensurePlayerCapacity(players.size());
+        int i = 0;
+        for (int j = 0, playerCount = players.size(); j < playerCount; j++) {
+            final ServerPlayer p = players.get(j);
+            if (!p.isSpectator() && !(ignoreCreativePlayers && p.isCreative())) {
+                this.playerX[i] = p.getX();
+                this.playerY[i] = p.getY();
+                this.playerZ[i] = p.getZ();
+                i++;
+            }
+        }
+        this.tree.build(this.playerCoords, this.playerIndices, i);
+    }""",
+    "natural spawn KD allocation removal",
+)
+
+print("Stage 3: collision, AsyncPath correctness, despawn/spawn allocation optimizations applied.")
+
 print("All Warext optimized Leaf 26.3 performance patches applied.")
