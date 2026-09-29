@@ -1568,162 +1568,111 @@ print("Stage 6: adaptive small-player spatial lookup optimization applied.")
 
 
 # 19) Async pathfinding correctness (Leaf PR #921 concepts ported to 26.3):
-#     - never force pending POI path calculations onto the server thread
-#     - invalidate stale async results when behavior memories change
-#     - revalidate POI ownership/type after asynchronous calculation completes
+#     - do not force pending POI paths onto the server thread
+#     - revalidate POI state after asynchronous calculation
 acquire_poi = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/behavior/AcquirePoi.java"
+data = read(acquire_poi)
 
-replace_once(
-    acquire_poi,
-    """        if (!body.getBrain().checkMemory(memoryToValidate, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
-            return false;
-        }
-        if (memoryToValidate != memoryToAcquire) {
-            if (!body.getBrain().checkMemory(memoryToAcquire, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
-                return false;
-            }
-        }
-        RandomSource random = level.getRandom();
-        if (pending != null && stateSet != null) {
-            pending.process();
-            processPath(poiType, onPoiAcquisitionEvent, batchCache, level, body, memoryToAcquire, timestamp, level.getPoiManager(), stateSet, pending, random);
-            pending = null;
-            stateSet = null;
-        }
-
-        if (onlyIfAdult && body.isBaby()) {
-            return false;
-        }""",
-    """        if (!body.getBrain().checkMemory(memoryToValidate, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
-            pending = null;
-            stateSet = null;
-            return false;
-        }
-        if (memoryToValidate != memoryToAcquire) {
-            if (!body.getBrain().checkMemory(memoryToAcquire, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
-                pending = null;
-                stateSet = null;
-                return false;
-            }
-        }
-
-        if (onlyIfAdult && body.isBaby()) {
-            pending = null;
-            stateSet = null;
-            return false;
-        }
-
-        RandomSource random = level.getRandom();
-        if (pending != null && stateSet != null) {
-            // Do not turn queue pressure into an MSPT spike by processing this path synchronously.
-            if (!pending.isProcessed()) {
-                return false;
-            }
-            processPath(poiType, onPoiAcquisitionEvent, batchCache, level, body, memoryToAcquire, timestamp, level.getPoiManager(), stateSet, pending, random, validPoi);
-            pending = null;
-            stateSet = null;
-            return true;
-        }""",
-    "async POI wait without server-thread path execution",
+if data.count("pending.process();") != 1:
+    raise RuntimeError(f"AcquirePoi pending.process: expected 1 match, got {data.count('pending.process();')}")
+data = data.replace(
+    "pending.process();",
+    "if (!pending.isProcessed()) return false; // Warext - keep async work off the tick thread",
+    1,
 )
 
-# Update the normal completed-path call to carry the validator as well.
-data=read(acquire_poi)
-old="""            processPath(poiType, onPoiAcquisitionEvent, batchCache, level, body, memoryToAcquire, timestamp, poiManager, poiPositions, path, random);"""
-new="""            processPath(poiType, onPoiAcquisitionEvent, batchCache, level, body, memoryToAcquire, timestamp, poiManager, poiPositions, path, random, validPoi);"""
-count=data.count(old)
-if count != 1:
-    raise RuntimeError(f"AcquirePoi direct processPath call: expected 1 match, got {count}")
-data=data.replace(old,new,1)
-write(acquire_poi,data)
-print("[ok] async POI validator propagation")
+old_pending_call = "processPath(poiType, onPoiAcquisitionEvent, batchCache, level, body, memoryToAcquire, timestamp, level.getPoiManager(), stateSet, pending, random);"
+if data.count(old_pending_call) != 1:
+    raise RuntimeError(f"AcquirePoi pending processPath: expected 1 match, got {data.count(old_pending_call)}")
+data = data.replace(old_pending_call, old_pending_call[:-2] + ", validPoi);", 1)
 
-replace_once(
-    acquire_poi,
-    """                                    final Set<Pair<Holder<PoiType>, BlockPos>> poiPositions,
-                                    final @org.jspecify.annotations.Nullable Path path,
-                                    final RandomSource random) {
-        if (path != null && path.canReach()) {
-            BlockPos targetPos = path.getTarget();
+old_direct_call = "processPath(poiType, onPoiAcquisitionEvent, batchCache, level, body, memoryToAcquire, timestamp, poiManager, poiPositions, path, random);"
+if data.count(old_direct_call) != 1:
+    raise RuntimeError(f"AcquirePoi direct processPath: expected 1 match, got {data.count(old_direct_call)}")
+data = data.replace(old_direct_call, old_direct_call[:-2] + ", validPoi);", 1)
+
+# Add validator parameter only to the extracted processPath method.
+method_pos = data.find("private static void processPath(")
+if method_pos < 0:
+    raise RuntimeError("AcquirePoi processPath method not found")
+sig_end = data.find(") {", method_pos)
+if sig_end < 0:
+    raise RuntimeError("AcquirePoi processPath signature end not found")
+signature = data[method_pos:sig_end]
+needle = "final RandomSource random"
+if needle not in signature:
+    raise RuntimeError("AcquirePoi processPath RandomSource parameter not found")
+signature_new = signature.replace(
+    needle,
+    needle + ",\n                                    final BiPredicate<ServerLevel, BlockPos> validPoi",
+    1,
+)
+data = data[:method_pos] + signature_new + data[sig_end:]
+
+# Revalidate and atomically claim the POI after the async result is ready.
+method_pos = data.find("private static void processPath(")
+method_end = data.find("// Kaiiju end - petal - async path processing", method_pos)
+segment = data[method_pos:method_end]
+old_body = """BlockPos targetPos = path.getTarget();
             poiManager.getType(targetPos).ifPresent(type -> {
                 poiManager.take(poiType, (t, poiPos) -> poiPos.equals(targetPos), targetPos, 1);
                 walkTarget.getBrain().setMemory(memoryToAcquire, GlobalPos.of(level.dimension(), targetPos));
                 onPoiAcquisitionEvent.ifPresent(event -> level.broadcastEntityEvent(walkTarget, event));
                 batchCache.clear();
                 level.debugSynchronizers().updatePoi(targetPos);
-            });""",
-    """                                    final Set<Pair<Holder<PoiType>, BlockPos>> poiPositions,
-                                    final @org.jspecify.annotations.Nullable Path path,
-                                    final RandomSource random,
-                                    final BiPredicate<ServerLevel, BlockPos> validPoi) {
-        if (path != null && path.canReach()) {
-            BlockPos targetPos = path.getTarget();
-            // World/POI state may have changed while the path was computed off-thread.
-            if (!validPoi.test(level, targetPos)) {
-                return;
-            }
+            });"""
+new_body = """BlockPos targetPos = path.getTarget();
+            if (!validPoi.test(level, targetPos)) return; // Warext - stale async result
             poiManager.take(poiType, (t, poiPos) -> poiPos.equals(targetPos), targetPos, 1).ifPresent(acquiredPos -> {
                 walkTarget.getBrain().setMemory(memoryToAcquire, GlobalPos.of(level.dimension(), acquiredPos));
                 onPoiAcquisitionEvent.ifPresent(event -> level.broadcastEntityEvent(walkTarget, event));
                 batchCache.clear();
                 level.debugSynchronizers().updatePoi(acquiredPos);
-            });""",
-    "async POI result revalidation",
-)
+            });"""
+if segment.count(old_body) != 1:
+    raise RuntimeError(f"AcquirePoi result body: expected 1 match, got {segment.count(old_body)}")
+segment = segment.replace(old_body, new_body, 1)
+data = data[:method_pos] + segment + data[method_end:]
+write(acquire_poi, data)
+print("[ok] async POI nonblocking wait + result revalidation")
 
 home = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/behavior/SetClosestHomeAsWalkTarget.java"
-replace_once(
-    home,
-    """        if (!body.getBrain().checkMemory(MemoryModuleType.WALK_TARGET, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
-            return false;
-        }
-        if (!body.getBrain().checkMemory(MemoryModuleType.HOME, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
-            return false;
-        }
-
-        if (pending != null) {
-            pending.process();
-            processPath(speedModifier, batchCache, lastUpdate, body, level, level.getPoiManager(), stateInt, pending);
-            pending = null;
-        }""",
-    """        if (!body.getBrain().checkMemory(MemoryModuleType.WALK_TARGET, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
-            pending = null;
-            return false;
-        }
-        if (!body.getBrain().checkMemory(MemoryModuleType.HOME, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {
-            pending = null;
-            return false;
-        }
-
-        if (pending != null) {
-            if (!pending.isProcessed()) {
-                return false;
-            }
-            processPath(speedModifier, batchCache, lastUpdate, body, level, level.getPoiManager(), stateInt, pending);
-            pending = null;
-            return true;
-        }""",
-    "async home path wait without synchronous processing",
+data = read(home)
+if data.count("pending.process();") != 1:
+    raise RuntimeError(f"Home pending.process: expected 1 match, got {data.count('pending.process();')}")
+data = data.replace(
+    "pending.process();",
+    "if (!pending.isProcessed()) return false; // Warext - keep async work off the tick thread",
+    1,
 )
 
-replace_once(
-    home,
-    """            Optional<Holder<PoiType>> type = poiManager.getType(targetPos);
-            if (type.isPresent()) {
-                walkTarget.getBrain().setMemory(MemoryModuleType.WALK_TARGET, new WalkTarget(targetPos, speedModifier, 1));
-                level.debugSynchronizers().updatePoi(targetPos);
-            }""",
-    """            Optional<Holder<PoiType>> type = poiManager.getType(targetPos);
-            // Revalidate after off-thread calculation: the target may no longer be a HOME POI.
-            if (type.isPresent() && type.get().is(PoiTypes.HOME)) {
-                walkTarget.getBrain().setMemory(MemoryModuleType.WALK_TARGET, new WalkTarget(targetPos, speedModifier, 1));
-                level.debugSynchronizers().updatePoi(targetPos);
-            }""",
-    "async home POI result revalidation",
+# Once a pending result is consumed, do not immediately schedule another path in the same behavior trigger.
+pending_call = "processPath(speedModifier, batchCache, lastUpdate, body, level, level.getPoiManager(), stateInt, pending);"
+if data.count(pending_call) != 1:
+    raise RuntimeError(f"Home pending processPath: expected 1 match, got {data.count(pending_call)}")
+data = data.replace(
+    pending_call + "\n            pending = null;",
+    pending_call + "\n            pending = null;\n            return true;",
+    1,
 )
+
+method_pos = data.find("private static void processPath(")
+if method_pos < 0:
+    raise RuntimeError("Home processPath method not found")
+method_end = data.find("// Kaiiju end - petal - async path processing", method_pos)
+segment = data[method_pos:method_end]
+old_type = """Optional<Holder<PoiType>> type = poiManager.getType(targetPos);
+            if (type.isPresent()) {"""
+new_type = """Optional<Holder<PoiType>> type = poiManager.getType(targetPos);
+            if (type.isPresent() && type.get().is(PoiTypes.HOME)) { // Warext - revalidate stale async result"""
+if segment.count(old_type) != 1:
+    raise RuntimeError(f"Home POI validation: expected 1 match, got {segment.count(old_type)}")
+segment = segment.replace(old_type, new_type, 1)
+data = data[:method_pos] + segment + data[method_end:]
+write(home, data)
+print("[ok] async HOME nonblocking wait + result revalidation")
 
 print("Stage 7: async pathfinding POI correctness/p99 fixes applied.")
-
 
 # 20) Tracker interpolation: accumulate predicted movement in primitives instead of allocating Vec3
 #     on every movement event / merge. Materialize at most one Vec3 when interpolation consumes it.
