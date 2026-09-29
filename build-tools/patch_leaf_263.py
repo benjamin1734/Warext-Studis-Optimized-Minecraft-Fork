@@ -2230,4 +2230,536 @@ replace_once(
 
 print("Stage 13: precipitation random-tick lookup optimization applied.")
 
+
+# 26) Async path behavior lifecycle correctness:
+#     release stale pending paths when behavior memories invalidate, avoid immediately scheduling
+#     another POI path after consuming a finished async result, and stop waiting on stale walk targets.
+def insert_before_return_after(rel, anchor, statements, label):
+    data = read(rel)
+    anchor_pos = data.find(anchor)
+    if anchor_pos < 0:
+        raise RuntimeError(f"{label}: anchor not found in {rel}")
+    return_pos = data.find("return false;", anchor_pos)
+    if return_pos < 0:
+        raise RuntimeError(f"{label}: return false not found in {rel}")
+    line_start = data.rfind("\n", 0, return_pos) + 1
+    indent = data[line_start:return_pos]
+    insertion = "".join(statement + "\n" + indent for statement in statements)
+    data = data[:return_pos] + insertion + data[return_pos:]
+    write(rel, data)
+    print(f"[ok] {label}")
+
+def insert_after_statement_between(rel, anchor, end_anchor, statement, addition, label):
+    data = read(rel)
+    start = data.find(anchor)
+    if start < 0:
+        raise RuntimeError(f"{label}: anchor not found in {rel}")
+    end = data.find(end_anchor, start)
+    if end < 0:
+        raise RuntimeError(f"{label}: end anchor not found in {rel}")
+    segment = data[start:end]
+    stmt = segment.find(statement)
+    if stmt < 0:
+        raise RuntimeError(f"{label}: statement not found in {rel}")
+    stmt_end = stmt + len(statement)
+    absolute_stmt = start + stmt
+    line_start = data.rfind("\n", 0, absolute_stmt) + 1
+    indent = data[line_start:absolute_stmt]
+    segment = segment[:stmt_end] + "\n" + indent + addition + segment[stmt_end:]
+    data = data[:start] + segment + data[end:]
+    write(rel, data)
+    print(f"[ok] {label}")
+
+acquire_poi = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/behavior/AcquirePoi.java"
+
+insert_before_return_after(
+    acquire_poi,
+    "if (!body.getBrain().checkMemory(memoryToValidate, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {",
+    ["pending = null;", "stateSet = null;"],
+    "async POI clears stale pending path on validation-memory change",
+)
+
+insert_before_return_after(
+    acquire_poi,
+    "if (!body.getBrain().checkMemory(memoryToAcquire, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {",
+    ["pending = null;", "stateSet = null;"],
+    "async POI clears stale pending path on acquisition-memory change",
+)
+
+insert_after_statement_between(
+    acquire_poi,
+    "if (pending != null && stateSet != null) {",
+    "if (onlyIfAdult && body.isBaby()) {",
+    "stateSet = null;",
+    "return true; // Warext - do not schedule a second POI path in the same behavior trigger",
+    "async POI avoids duplicate same-tick reschedule",
+)
+
+insert_before_return_after(
+    acquire_poi,
+    "if (onlyIfAdult && body.isBaby()) {",
+    ["pending = null;", "stateSet = null;"],
+    "async POI clears pending path when adult-only behavior becomes invalid",
+)
+
+home = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/behavior/SetClosestHomeAsWalkTarget.java"
+
+insert_before_return_after(
+    home,
+    "if (!body.getBrain().checkMemory(MemoryModuleType.WALK_TARGET, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {",
+    ["pending = null;"],
+    "async HOME clears stale pending path when walk target appears",
+)
+
+insert_before_return_after(
+    home,
+    "if (!body.getBrain().checkMemory(MemoryModuleType.HOME, net.minecraft.world.entity.ai.memory.MemoryStatus.VALUE_ABSENT)) {",
+    ["pending = null;"],
+    "async HOME clears stale pending path when HOME memory appears",
+)
+
+move_sink = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/behavior/MoveToTargetSink.java"
+data = read(move_sink)
+old_guard = "if (org.dreeam.leaf.config.modules.async.AsyncPathfinding.enabled && !this.finishedProcessing) return true; // Kaiiju - petal - async path processing - wait for processing"
+if data.count(old_guard) != 1:
+    raise RuntimeError(f"async MoveToTargetSink stale-target guard: expected 1 match, got {data.count(old_guard)}")
+new_guard = """if (org.dreeam.leaf.config.modules.async.AsyncPathfinding.enabled && !this.finishedProcessing) {
+            Optional<WalkTarget> pendingTarget = body.getBrain().getMemory(MemoryModuleType.WALK_TARGET);
+            return pendingTarget.isPresent()
+                && !this.reachedTarget(body, pendingTarget.get())
+                && !isWalkTargetSpectator(pendingTarget.get());
+        } // Warext - do not keep a stale async navigation behavior alive"""
+data = data.replace(old_guard, new_guard, 1)
+write(move_sink, data)
+print("[ok] async MoveToTargetSink stale-target guard")
+
+print("Stage 14: async path behavior lifecycle cleanup applied.")
+
+
+# 27) Cache Entity#getEncodeId(): entity type is immutable for an entity's lifetime, so repeated
+#     registry/string construction is unnecessary. Null remains uncached for non-serializable entities.
+entity_java = "leaf-server/src/minecraft/java/net/minecraft/world/entity/Entity.java"
+
+replace_once(
+    entity_java,
+    """    private final boolean shouldSkipBaseDespawnCheck = this instanceof net.minecraft.world.entity.projectile.ThrowableProjectile; // Leaf - Rewrite entity despawn time""",
+    """    private final boolean shouldSkipBaseDespawnCheck = this instanceof net.minecraft.world.entity.projectile.ThrowableProjectile; // Leaf - Rewrite entity despawn time
+    private @Nullable String warext$cachedEncodeId;""",
+    "entity encode-id cache field",
+)
+
+data = read(entity_java)
+needle = """    public final @Nullable String getEncodeId() {
+        // Paper start - Raw entity serialization API
+        return this.getEncodeId(false);
+    }"""
+replacement = """    public final @Nullable String getEncodeId() {
+        String cached = this.warext$cachedEncodeId;
+        if (cached != null) {
+            return cached;
+        }
+        // Paper start - Raw entity serialization API
+        cached = this.getEncodeId(false);
+        if (cached != null) {
+            this.warext$cachedEncodeId = cached;
+        }
+        return cached;
+    }"""
+if data.count(needle) != 1:
+    raise RuntimeError(f"Entity#getEncodeId cache target: expected 1 match, got {data.count(needle)}")
+data = data.replace(needle, replacement, 1)
+write(entity_java, data)
+print("[ok] cached entity encode id")
+
+print("Stage 15: immutable entity encode-id caching applied.")
+
+
+# 28) Async pathfinding burst memory/latency control.
+# Evaluators are checked out before tasks enter the executor queue, so an oversized queue can
+# temporarily create hundreds/thousands of heavyweight evaluator instances. Keep enough backlog
+# for throughput without retaining huge stale bursts.
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/async/AsyncPathfinding.java",
+    """        if (asyncPathfindingQueueSize <= 0) {
+            asyncPathfindingQueueSize = asyncPathfindingMaxThreads * 256;
+        }""",
+    """        if (asyncPathfindingQueueSize <= 0) {
+            asyncPathfindingQueueSize = Math.max(
+                512,
+                Math.min(1024, asyncPathfindingMaxThreads * 128)
+            );
+        }""",
+    "bounded adaptive pathfinding queue",
+)
+
+node_cache = "leaf-server/src/main/java/org/dreeam/leaf/async/path/NodeEvaluatorCache.java"
+replace_once(
+    node_cache,
+    """    private static final ConcurrentHashMap<PoolKey, ConcurrentLinkedQueue<NodeEvaluator>> NODE_EVALUATORS = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<IdentityKey<NodeEvaluator>, ConcurrentLinkedQueue<NodeEvaluator>> NODE_EVALUATOR_TO_POOL = new ConcurrentHashMap<>();""",
+    """    private static final ConcurrentHashMap<PoolKey, ConcurrentLinkedQueue<NodeEvaluator>> NODE_EVALUATORS = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<IdentityKey<NodeEvaluator>, ConcurrentLinkedQueue<NodeEvaluator>> NODE_EVALUATOR_TO_POOL = new ConcurrentHashMap<>();
+
+    private static int retainedPoolLimit() {
+        final int configured = Integer.getInteger("warext.pathfinding.evaluator-pool-cap", 0);
+        if (configured > 0) {
+            return Math.max(1, Math.min(128, configured));
+        }
+        final int threads = Math.max(1, org.dreeam.leaf.config.modules.async.AsyncPathfinding.asyncPathfindingMaxThreads);
+        return Math.max(4, Math.min(32, threads * 2));
+    }""",
+    "pathfinding evaluator retained-pool cap",
+)
+
+replace_once(
+    node_cache,
+    """        Validate.notNull(pool, "NodeEvaluator already returned");
+        pool.offer(nodeEvaluator);""",
+    """        Validate.notNull(pool, "NodeEvaluator already returned");
+        if (pool.size() < retainedPoolLimit()) {
+            pool.offer(nodeEvaluator);
+        }""",
+    "discard excess burst evaluators",
+)
+
+print("Stage 16: pathfinding burst queue and evaluator retention limits applied.")
+
+
+# 29) Async tracker: reuse Future[] and join-context arrays across ticks.
+# Task objects themselves remain per-tick, but these two wrapper arrays no longer churn when
+# the task count is stable (which is the normal case under a steady entity count).
+async_tracker = "leaf-server/src/main/java/org/dreeam/leaf/async/tracker/AsyncTracker.java"
+
+replace_once(
+    async_tracker,
+    """    private Future<TrackerCtx> @Nullable [] fut;""",
+    """    @SuppressWarnings("unchecked")
+    private Future<TrackerCtx>[] futureBuffer = new Future[0];
+    private TrackerCtx[] joinBuffer = new TrackerCtx[0];
+    private int futureCount;
+    private boolean futuresPending;""",
+    "tracker reusable future/join buffers fields",
+)
+
+replace_once(
+    async_tracker,
+    """        @SuppressWarnings("unchecked")
+        Future<TrackerCtx>[] futures = new Future[taskCount];
+
+        int cursor = 0;""",
+    """        if (this.futureBuffer.length != taskCount) {
+            @SuppressWarnings("unchecked")
+            Future<TrackerCtx>[] resized = new Future[taskCount];
+            this.futureBuffer = resized;
+        }
+        final Future<TrackerCtx>[] futures = this.futureBuffer;
+        this.futureCount = taskCount;
+        this.futuresPending = true;
+
+        int cursor = 0;""",
+    "tracker Future array reuse",
+)
+
+replace_once(
+    async_tracker,
+    """        exec.unpark();
+        this.fut = futures;""",
+    """        exec.unpark();""",
+    "tracker remove transient Future array assignment",
+)
+
+replace_once(
+    async_tracker,
+    """    public void onEntitiesTickEnd() {
+        Future<TrackerCtx>[] task = this.fut;
+        if (task == null) {
+            return;
+        }
+        for (final Future<TrackerCtx> fut : task) {
+            if (!fut.isDone()) {
+                return;
+            }
+        }
+        this.fut = null;
+        handle(task);
+    }
+
+    public void onTickEnd() {
+        Future<TrackerCtx>[] task = this.fut;
+        this.fut = null;
+        if (task == null) {
+            return;
+        }
+        handle(task);
+    }""",
+    """    public void onEntitiesTickEnd() {
+        if (!this.futuresPending) {
+            return;
+        }
+        final Future<TrackerCtx>[] task = this.futureBuffer;
+        final int count = this.futureCount;
+        for (int i = 0; i < count; i++) {
+            if (!task[i].isDone()) {
+                return;
+            }
+        }
+        this.futuresPending = false;
+        handle(task, count);
+    }
+
+    public void onTickEnd() {
+        if (!this.futuresPending) {
+            return;
+        }
+        this.futuresPending = false;
+        handle(this.futureBuffer, this.futureCount);
+    }""",
+    "tracker active future count handling",
+)
+
+replace_once(
+    async_tracker,
+    """    private void handle(final Future<TrackerCtx>[] futures) {
+        try {
+            TrackerCtx ctx = futures[0].get();
+            TrackerCtx[] contexts = new TrackerCtx[futures.length - 1];
+            for (int i = 1; i < futures.length; i++) {
+                contexts[i - 1] = ctx.join(futures[i].get());
+            }
+            ctx.handle(contexts);
+
+            for (Future<TrackerCtx> future : futures) {
+                TrackerCtx completed = future.get();
+                completed.reset();
+                this.trackerCtxPool.addLast(completed);
+            }
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (final ExecutionException e) {
+            throw new RuntimeException(e);
+        }
+    }""",
+    """    private void handle(final Future<TrackerCtx>[] futures, final int count) {
+        try {
+            TrackerCtx ctx = futures[0].get();
+            final int joinedCount = count - 1;
+            if (this.joinBuffer.length != joinedCount) {
+                this.joinBuffer = new TrackerCtx[joinedCount];
+            }
+            final TrackerCtx[] contexts = this.joinBuffer;
+            for (int i = 1; i < count; i++) {
+                contexts[i - 1] = ctx.join(futures[i].get());
+            }
+            ctx.handle(contexts);
+
+            for (int i = 0; i < count; i++) {
+                TrackerCtx completed = futures[i].get();
+                futures[i] = null;
+                completed.reset();
+                this.trackerCtxPool.addLast(completed);
+            }
+            java.util.Arrays.fill(contexts, null);
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (final ExecutionException e) {
+            throw new RuntimeException(e);
+        }
+    }""",
+    "tracker join/future wrapper array reuse",
+)
+
+print("Stage 17: reusable tracker Future/join arrays applied.")
+
+
+# 30) Light packet ThreadLocal retention cleanup.
+# The reusable ThreadLocal buffers must not retain DataLayer byte[] references after the packet
+# clones them, otherwise a long-lived Netty/server thread can keep chunk-light arrays alive.
+light_packet = "leaf-server/src/minecraft/java/net/minecraft/network/protocol/game/ClientboundLightUpdatePacketData.java"
+replace_once(
+    light_packet,
+    """        for (int i = 0; i < skyCount; i++) {
+            skyUpdates[i] = skyBuffer[i].clone();
+        }""",
+    """        for (int i = 0; i < skyCount; i++) {
+            skyUpdates[i] = skyBuffer[i].clone();
+            skyBuffer[i] = null;
+        }""",
+    "release sky light ThreadLocal buffer refs",
+)
+replace_once(
+    light_packet,
+    """        for (int i = 0; i < blockCount; i++) {
+            blockUpdates[i] = blockBuffer[i].clone();
+        }""",
+    """        for (int i = 0; i < blockCount; i++) {
+            blockUpdates[i] = blockBuffer[i].clone();
+            blockBuffer[i] = null;
+        }""",
+    "release block light ThreadLocal buffer refs",
+)
+print("Stage 18: light packet ThreadLocal retention cleanup applied.")
+
+# 31) Final performance profile layer.
+# Balanced is the default for new configurations; extreme opts into the async entity tracker.
+profile_java = """package org.dreeam.leaf.performance;
+
+import java.util.Locale;
+
+public final class WarextPerformanceProfile {
+
+    public enum Mode {
+        COMPATIBILITY,
+        BALANCED,
+        EXTREME
+    }
+
+    private static final Mode MODE = parse(System.getProperty("warext.profile", "balanced"));
+
+    private WarextPerformanceProfile() {
+    }
+
+    private static Mode parse(final String value) {
+        if (value == null) {
+            return Mode.BALANCED;
+        }
+        return switch (value.trim().toLowerCase(Locale.ROOT)) {
+            case "compat", "compatibility", "safe" -> Mode.COMPATIBILITY;
+            case "extreme", "max", "maximum" -> Mode.EXTREME;
+            default -> Mode.BALANCED;
+        };
+    }
+
+    public static Mode mode() {
+        return MODE;
+    }
+
+    public static boolean isExtreme() {
+        return MODE == Mode.EXTREME;
+    }
+
+    public static boolean asyncPathfindingDefault() {
+        return MODE != Mode.COMPATIBILITY && Runtime.getRuntime().availableProcessors() >= 4;
+    }
+
+    public static boolean asyncTrackerDefault() {
+        return MODE == Mode.EXTREME && Runtime.getRuntime().availableProcessors() >= 4;
+    }
+
+    public static int trackerMinEntitiesPerTask() {
+        return MODE == Mode.EXTREME ? 32 : 64;
+    }
+}
+"""
+profile_path = root / "leaf-server/src/main/java/org/dreeam/leaf/performance/WarextPerformanceProfile.java"
+profile_path.parent.mkdir(parents=True, exist_ok=True)
+profile_path.write_text(profile_java, encoding="utf-8")
+print("[ok] Warext performance profiles")
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/async/AsyncPathfinding.java",
+    "    public static boolean enabled = false;",
+    "    public static boolean enabled = org.dreeam.leaf.performance.WarextPerformanceProfile.asyncPathfindingDefault();",
+    "balanced async pathfinding default",
+)
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/async/MultithreadedTracker.java",
+    "    public static boolean enabled = false;",
+    "    public static boolean enabled = org.dreeam.leaf.performance.WarextPerformanceProfile.asyncTrackerDefault();",
+    "extreme async tracker default",
+)
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/async/MultithreadedTracker.java",
+    '        enabled = globalConfig.getBoolean(basePath() + ".enabled", false);',
+    '        enabled = globalConfig.getBoolean(basePath() + ".enabled", enabled);',
+    "tracker profile-aware config default",
+)
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/async/MultithreadedTracker.java",
+    """        threads = globalConfig.getInt(basePath() + ".threads", 0);
+        if (threads <= 0) {""",
+    """        threads = globalConfig.getInt(basePath() + ".threads", 0);
+        minEntitiesPerTask = Math.max(16, globalConfig.getInt(
+            basePath() + ".min-entities-per-task",
+            org.dreeam.leaf.performance.WarextPerformanceProfile.trackerMinEntitiesPerTask()
+        ));
+        if (threads <= 0) {""",
+    "tracker adaptive task-size config",
+)
+
+# Extreme mode gives one additional CPU to async work on sufficiently large hosts while
+# still reserving at least one processor for the tick thread / GC / Netty.
+budget_file = "leaf-server/src/main/java/org/dreeam/leaf/performance/WarextCpuBudget.java"
+replace_once(
+    budget_file,
+    """        if (PROCESSORS >= 24) return 5;
+        if (PROCESSORS >= 16) return 4;
+        if (PROCESSORS >= 8) return 2;
+        return 1;""",
+    """        int reserved;
+        if (PROCESSORS >= 24) reserved = 5;
+        else if (PROCESSORS >= 16) reserved = 4;
+        else if (PROCESSORS >= 8) reserved = 2;
+        else reserved = 1;
+
+        if (WarextPerformanceProfile.isExtreme() && reserved > 1) {
+            reserved--;
+        }
+        return reserved;""",
+    "profile-aware CPU headroom",
+)
+
+replace_once(
+    budget_file,
+    """        final int budget = workerBudget();
+        return Math.max(1, Math.min(8, (budget * 35 + 99) / 100));""",
+    """        final int budget = workerBudget();
+        final int percent = WarextPerformanceProfile.isExtreme() ? 45 : 35;
+        return Math.max(1, Math.min(8, (budget * percent + 99) / 100));""",
+    "profile-aware pathfinding CPU share",
+)
+
+replace_once(
+    budget_file,
+    """        int path = pathfindingThreads();
+        int tracker = Math.max(1, Math.min(8, (budget * 35 + 99) / 100));""",
+    """        int path = pathfindingThreads();
+        final int percent = WarextPerformanceProfile.isExtreme() ? 45 : 35;
+        int tracker = Math.max(1, Math.min(8, (budget * percent + 99) / 100));""",
+    "profile-aware tracker CPU share",
+)
+
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/opt/SleepingBlockEntity.java",
+    "    public static boolean enabled = false;",
+    "    public static boolean enabled = org.dreeam.leaf.performance.WarextPerformanceProfile.isExtreme();",
+    "extreme sleeping block entities default",
+)
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/opt/DynamicActivationofBrain.java",
+    "    public static boolean enabled = false;",
+    "    public static boolean enabled = org.dreeam.leaf.performance.WarextPerformanceProfile.isExtreme();",
+    "extreme dynamic brain activation default",
+)
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/opt/OptimizeEntityActivation.java",
+    "    public static boolean enabled = false;",
+    "    public static boolean enabled = org.dreeam.leaf.performance.WarextPerformanceProfile.isExtreme();",
+    "extreme entity activation optimizer default",
+)
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/opt/OptimizeRandomTick.java",
+    "    public static boolean enabled = false;",
+    "    public static boolean enabled = org.dreeam.leaf.performance.WarextPerformanceProfile.isExtreme();",
+    "extreme random tick optimizer default",
+)
+
+print("Finalization: Warext balanced/extreme performance profiles applied.")
+
 print("All Warext optimized Leaf 26.3 performance patches applied.")
