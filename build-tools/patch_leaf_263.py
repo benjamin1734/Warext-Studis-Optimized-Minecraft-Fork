@@ -2184,4 +2184,50 @@ print("[ok] tracker packet-map import cleanup")
 
 print("Stage 12: reusable tracker packet batching buffers applied.")
 
+
+# 25) Precipitation random-tick optimization.
+# Ported from Leaf PR #854 (GPL-3.0-only).
+# Original patch author attribution preserved per the upstream patch:
+# HaHaWTH <102713261+HaHaWTH@users.noreply.github.com>
+server_level = "leaf-server/src/minecraft/java/net/minecraft/server/level/ServerLevel.java"
+
+replace_once(
+    server_level,
+    """                this.tickPrecipitation(this.getBlockRandomPos(minX, 0, minZ, 15));""",
+    """                this.tickPrecipitation(this.getBlockRandomPos(minX, 0, minZ, 15), chunk); // Warext - Leaf PR #854 precipitation lookup reuse""",
+    "precipitation reuses current chunk",
+)
+
+data = read(server_level)
+needle = """    public void tickPrecipitation(final BlockPos pos) {
+        BlockPos topPos = this.getHeightmapPos(Heightmap.Types.MOTION_BLOCKING, pos);
+        BlockPos belowPos = topPos.below();
+        Biome biome = this.getBiome(topPos).value();"""
+replacement = """    public void tickPrecipitation(final BlockPos pos) {
+        this.tickPrecipitation(pos, null);
+    }
+
+    // Warext - ported from Leaf PR #854, original patch by HaHaWTH
+    public void tickPrecipitation(final BlockPos pos, final @Nullable LevelChunk chunk) {
+        BlockPos topPos = chunk == null
+            ? this.getHeightmapPos(Heightmap.Types.MOTION_BLOCKING, pos)
+            : new BlockPos(pos.getX(), chunk.getHeight(Heightmap.Types.MOTION_BLOCKING, pos.getX(), pos.getZ()) + 1, pos.getZ());
+        BlockPos belowPos = topPos.below();
+        Biome biome = this.getBiomeCached(chunk, topPos).value();"""
+if data.count(needle) != 1:
+    raise RuntimeError(f"ServerLevel tickPrecipitation body: expected 1 match, got {data.count(needle)}")
+data = data.replace(needle, replacement, 1)
+write(server_level, data)
+print("[ok] precipitation heightmap/biome lookup reuse")
+
+random_tick = "leaf-server/src/main/java/org/dreeam/leaf/world/RandomTickSystem.java"
+replace_once(
+    random_tick,
+    """                world.tickPrecipitation(world.getBlockRandomPos(pos.getMinBlockX(), 0, pos.getMinBlockZ(), 15));""",
+    """                world.tickPrecipitation(world.getBlockRandomPos(pos.getMinBlockX(), 0, pos.getMinBlockZ(), 15), chunk); // Warext - Leaf PR #854""",
+    "random tick precipitation chunk reuse",
+)
+
+print("Stage 13: precipitation random-tick lookup optimization applied.")
+
 print("All Warext optimized Leaf 26.3 performance patches applied.")
