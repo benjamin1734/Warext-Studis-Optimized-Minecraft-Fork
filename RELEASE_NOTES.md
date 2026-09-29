@@ -13,12 +13,15 @@ Experimental performance-focused build based on Leaf dev/26.3.
 - Chunk cache p99 protection by avoiding hot-path shrink rehashes.
 - Collision step buffer reuse.
 - Precipitation/random-tick lookup reuse.
-- Real Java 25 startup/shutdown smoke tests in CI.
+- Async path lifecycle cleanup, bounded path queues and evaluator-pool retention limits.
+- Entity encode-id caching and reusable tracker Future/join wrapper arrays.
+- Light packet ThreadLocal buffer reference cleanup to reduce retained heap.
+- Real Java 25 startup/shutdown smoke tests in CI for both balanced and extreme profiles.
 
 ## Profiles
 - `compatibility`: conservative async defaults.
 - `balanced`: default; optimized async pathfinding on suitable CPUs, async tracker off by default.
-- `extreme`: enables the optimized async tracker and allocates more async CPU headroom.
+- `extreme`: enables the optimized async tracker, experimental entity-activation/random-tick/sleeping-block-entity/DAB optimizers, and allocates more async CPU headroom.
 
 Select with `-Dwarext.profile=balanced` or `-Dwarext.profile=extreme`.
 
