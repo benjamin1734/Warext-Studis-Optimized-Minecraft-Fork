@@ -1392,4 +1392,178 @@ print("[ok] tracker slice import cleanup")
 
 print("Stage 5: tracker context/range allocation optimization applied.")
 
+
+# 18) KD-tree adaptive small-N fast path: linear scan avoids build/partial-sort overhead on tiny player sets.
+def patch_kd_linear(rel, dims):
+    data = read(rel)
+    if dims == 2:
+        field_old = "    private int[] nil = EMPTY_INTS;"
+        field_new = """    private int[] nil = EMPTY_INTS;
+    private static final int LINEAR_THRESHOLD = Math.max(0, Integer.getInteger("warext.kdtree.linear-threshold", 8));
+    private int linearLength;
+    private double[] linearX = EMPTY_DOUBLES;
+    private double[] linearY = EMPTY_DOUBLES;"""
+        empty_old = """        if (length == 0 || coords.length != 2) {
+            ensureSearch(0, 0);
+            return;
+        }
+        if (length < 0 || length > indices.length) throw new IllegalArgumentException("Invalid KD-tree length");
+        for (int i = 0; i < length; i++) {"""
+        empty_new = """        if (length == 0 || coords.length != 2) {
+            this.linearLength = 0;
+            this.linearX = EMPTY_DOUBLES;
+            this.linearY = EMPTY_DOUBLES;
+            ensureSearch(0, 0);
+            return;
+        }
+        if (length < 0 || length > indices.length) throw new IllegalArgumentException("Invalid KD-tree length");
+        if (LINEAR_THRESHOLD > 0 && length <= LINEAR_THRESHOLD) {
+            this.linearLength = length;
+            this.linearX = coords[0];
+            this.linearY = coords[1];
+            ensureSearch(0, 0);
+            return;
+        }
+        this.linearLength = 0;
+        this.linearX = EMPTY_DOUBLES;
+        this.linearY = EMPTY_DOUBLES;
+        for (int i = 0; i < length; i++) {"""
+        empty_check_old = """    public boolean isEmpty() {
+        return this.search.length == 0 || this.search[0] == SENTINEL;
+    }"""
+        empty_check_new = """    public boolean isEmpty() {
+        return this.linearLength == 0 && (this.search.length == 0 || this.search[0] == SENTINEL);
+    }"""
+        nearest_old = """    public double nearestSqr(final double tx, final double ty, double dist) {
+        final int[] stack = this.search;"""
+        nearest_new = """    public double nearestSqr(final double tx, final double ty, double dist) {
+        if (this.linearLength != 0) {
+            final double[] x = this.linearX;
+            final double[] y = this.linearY;
+            for (int i = 0; i < this.linearLength; i++) {
+                final double dx = x[i] - tx;
+                final double dy = y[i] - ty;
+                dist = Math.min(dist, euclideanDistanceSquared(dx, dy));
+            }
+            return dist;
+        }
+        final int[] stack = this.search;"""
+        idx_old = """    public int nearestIdx(final double tx, final double ty, double dist) {
+        final int[] stack = this.search;"""
+        idx_new = """    public int nearestIdx(final double tx, final double ty, double dist) {
+        if (this.linearLength != 0) {
+            int nearest = -1;
+            final double[] x = this.linearX;
+            final double[] y = this.linearY;
+            for (int i = 0; i < this.linearLength; i++) {
+                final double dx = x[i] - tx;
+                final double dy = y[i] - ty;
+                final double candidate = euclideanDistanceSquared(dx, dy);
+                if (candidate < dist) {
+                    dist = candidate;
+                    nearest = i;
+                }
+            }
+            return nearest;
+        }
+        final int[] stack = this.search;"""
+    else:
+        field_old = "    private int[] nil = EMPTY_INTS;"
+        field_new = """    private int[] nil = EMPTY_INTS;
+    private static final int LINEAR_THRESHOLD = Math.max(0, Integer.getInteger("warext.kdtree.linear-threshold", 8));
+    private int linearLength;
+    private double[] linearX = EMPTY_DOUBLES;
+    private double[] linearY = EMPTY_DOUBLES;
+    private double[] linearZ = EMPTY_DOUBLES;"""
+        empty_old = """        if (length == 0 || coords.length != 3) {
+            ensureSearch(0, 0);
+            return;
+        }
+        if (length < 0 || length > indices.length) throw new IllegalArgumentException("Invalid KD-tree length");
+        for (int i = 0; i < length; i++) {"""
+        empty_new = """        if (length == 0 || coords.length != 3) {
+            this.linearLength = 0;
+            this.linearX = EMPTY_DOUBLES;
+            this.linearY = EMPTY_DOUBLES;
+            this.linearZ = EMPTY_DOUBLES;
+            ensureSearch(0, 0);
+            return;
+        }
+        if (length < 0 || length > indices.length) throw new IllegalArgumentException("Invalid KD-tree length");
+        if (LINEAR_THRESHOLD > 0 && length <= LINEAR_THRESHOLD) {
+            this.linearLength = length;
+            this.linearX = coords[0];
+            this.linearY = coords[1];
+            this.linearZ = coords[2];
+            ensureSearch(0, 0);
+            return;
+        }
+        this.linearLength = 0;
+        this.linearX = EMPTY_DOUBLES;
+        this.linearY = EMPTY_DOUBLES;
+        this.linearZ = EMPTY_DOUBLES;
+        for (int i = 0; i < length; i++) {"""
+        empty_check_old = """    public boolean isEmpty() {
+        return this.search.length == 0 || this.search[0] == SENTINEL;
+    }"""
+        empty_check_new = """    public boolean isEmpty() {
+        return this.linearLength == 0 && (this.search.length == 0 || this.search[0] == SENTINEL);
+    }"""
+        nearest_old = """    public double nearestSqr(final double tx, final double ty, final double tz, double dist) {
+        final int[] stack = this.search;"""
+        nearest_new = """    public double nearestSqr(final double tx, final double ty, final double tz, double dist) {
+        if (this.linearLength != 0) {
+            final double[] x = this.linearX;
+            final double[] y = this.linearY;
+            final double[] z = this.linearZ;
+            for (int i = 0; i < this.linearLength; i++) {
+                final double dx = x[i] - tx;
+                final double dy = y[i] - ty;
+                final double dz = z[i] - tz;
+                dist = Math.min(dist, euclideanDistanceSquared(dx, dy, dz));
+            }
+            return dist;
+        }
+        final int[] stack = this.search;"""
+        idx_old = """    public int nearestIdx(final double tx, final double ty, final double tz, double dist) {
+        final int[] stack = this.search;"""
+        idx_new = """    public int nearestIdx(final double tx, final double ty, final double tz, double dist) {
+        if (this.linearLength != 0) {
+            int nearest = -1;
+            final double[] x = this.linearX;
+            final double[] y = this.linearY;
+            final double[] z = this.linearZ;
+            for (int i = 0; i < this.linearLength; i++) {
+                final double dx = x[i] - tx;
+                final double dy = y[i] - ty;
+                final double dz = z[i] - tz;
+                final double candidate = euclideanDistanceSquared(dx, dy, dz);
+                if (candidate < dist) {
+                    dist = candidate;
+                    nearest = i;
+                }
+            }
+            return nearest;
+        }
+        final int[] stack = this.search;"""
+
+    for old, new, label in [
+        (field_old, field_new, "fields"),
+        (empty_old, empty_new, "build fast path"),
+        (empty_check_old, empty_check_new, "empty check"),
+        (nearest_old, nearest_new, "nearest fast path"),
+        (idx_old, idx_new, "nearest index fast path"),
+    ]:
+        count = data.count(old)
+        if count != 1:
+            raise RuntimeError(f"KDTree{dims}D {label}: expected 1 match, got {count}")
+        data = data.replace(old, new, 1)
+    write(rel, data)
+    print(f"[ok] KDTree{dims}D adaptive linear fast path")
+
+patch_kd_linear("leaf-server/src/main/java/org/dreeam/leaf/util/KDTree2D.java", 2)
+patch_kd_linear("leaf-server/src/main/java/org/dreeam/leaf/util/KDTree3D.java", 3)
+
+print("Stage 6: adaptive small-player spatial lookup optimization applied.")
+
 print("All Warext optimized Leaf 26.3 performance patches applied.")
