@@ -2385,8 +2385,8 @@ replace_once(
         }""",
     """        if (asyncPathfindingQueueSize <= 0) {
             asyncPathfindingQueueSize = Math.max(
-                128,
-                Math.min(512, asyncPathfindingMaxThreads * 96)
+                512,
+                Math.min(1024, asyncPathfindingMaxThreads * 128)
             );
         }""",
     "bounded adaptive pathfinding queue",
