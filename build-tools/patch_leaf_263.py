@@ -2731,6 +2731,35 @@ replace_once(
     "profile-aware tracker CPU share",
 )
 
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/opt/SleepingBlockEntity.java",
+    "    public static boolean enabled = false;",
+    "    public static boolean enabled = org.dreeam.leaf.performance.WarextPerformanceProfile.isExtreme();",
+    "extreme sleeping block entities default",
+)
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/opt/DynamicActivationofBrain.java",
+    "    public static boolean enabled = false;",
+    "    public static boolean enabled = org.dreeam.leaf.performance.WarextPerformanceProfile.isExtreme();",
+    "extreme dynamic brain activation default",
+)
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/opt/OptimizeEntityActivation.java",
+    "    public static boolean enabled = false;",
+    "    public static boolean enabled = org.dreeam.leaf.performance.WarextPerformanceProfile.isExtreme();",
+    "extreme entity activation optimizer default",
+)
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/opt/OptimizeRandomTick.java",
+    "    public static boolean enabled = false;",
+    "    public static boolean enabled = org.dreeam.leaf.performance.WarextPerformanceProfile.isExtreme();",
+    "extreme random tick optimizer default",
+)
+
 print("Finalization: Warext balanced/extreme performance profiles applied.")
 
 print("All Warext optimized Leaf 26.3 performance patches applied.")
