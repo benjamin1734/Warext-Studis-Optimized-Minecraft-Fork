@@ -2,10 +2,11 @@ name: Build Optimized Leaf 26.3 Fork
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "finalize-26.3-exp1" ]
     paths:
       - "build-tools/**"
       - ".github/workflows/build-fork.yml"
+      - "RELEASE_NOTES.md"
   workflow_dispatch:
 
 permissions:
@@ -14,7 +15,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 100
 
     steps:
       - name: Checkout fork build repository
@@ -57,16 +58,24 @@ jobs:
           cp UPSTREAM_COMMIT.txt artifacts/UPSTREAM_COMMIT.txt
           cat artifacts/SHA256SUMS.txt
 
-      - name: Smoke test built server
+      - name: Smoke test balanced and extreme profiles
         run: |
-          rm -rf smoke-test
-          mkdir -p smoke-test
-          cp artifacts/Warext-Studis-Optimized-Leaf-26.3.jar smoke-test/server.jar
-          cd smoke-test
-          printf 'eula=true\n' > eula.txt
-          cat > server.properties <<'EOF'
+          set -euo pipefail
+
+          run_smoke() {
+            PROFILE="$1"
+            PORT="$2"
+            DIR="smoke-$PROFILE"
+
+            rm -rf "$DIR"
+            mkdir -p "$DIR"
+            cp artifacts/Warext-Studis-Optimized-Leaf-26.3.jar "$DIR/server.jar"
+            cd "$DIR"
+
+            printf 'eula=true\n' > eula.txt
+            cat > server.properties <<EOF
           online-mode=false
-          server-port=25569
+          server-port=$PORT
           level-type=minecraft:flat
           view-distance=2
           simulation-distance=2
@@ -76,53 +85,89 @@ jobs:
           enable-rcon=false
           EOF
 
-          mkfifo console.pipe
-          exec 3<>console.pipe
-          java -Xms768M -Xmx1024M -jar server.jar nogui <console.pipe >server.log 2>&1 &
-          PID=$!
-          READY=0
+            mkfifo console.pipe
+            exec 3<>console.pipe
+            java -Dwarext.profile="$PROFILE" -Xms768M -Xmx1024M -jar server.jar nogui <console.pipe >server.log 2>&1 &
+            PID=$!
+            READY=0
 
-          for i in $(seq 1 90); do
-            if grep -q "Done (" server.log; then
-              READY=1
-              break
-            fi
-            if ! kill -0 "$PID" 2>/dev/null; then
-              echo "Server exited before reaching Done"
+            for i in $(seq 1 90); do
+              if grep -q "Done (" server.log; then
+                READY=1
+                break
+              fi
+              if ! kill -0 "$PID" 2>/dev/null; then
+                echo "Server exited before reaching Done for profile $PROFILE"
+                cat server.log
+                exit 1
+              fi
+              sleep 1
+            done
+
+            if [ "$READY" -ne 1 ]; then
+              echo "Server did not reach Done within 90 seconds for profile $PROFILE"
               cat server.log
+              echo "stop" >&3 || true
+              kill "$PID" 2>/dev/null || true
               exit 1
             fi
-            sleep 1
-          done
 
-          if [ "$READY" -ne 1 ]; then
-            echo "Server did not reach Done within 90 seconds"
-            cat server.log
-            echo "stop" >&3 || true
-            kill "$PID" 2>/dev/null || true
-            exit 1
-          fi
-
-          echo "stop" >&3
-          for i in $(seq 1 30); do
-            if ! kill -0 "$PID" 2>/dev/null; then
-              break
+            if [ "$PROFILE" = "balanced" ]; then
+              grep -q "Async Pathfinding" server.log || {
+                echo "Balanced profile did not initialize async pathfinding"
+                cat server.log
+                exit 1
+              }
             fi
-            sleep 1
-          done
-          if kill -0 "$PID" 2>/dev/null; then
-            echo "Server did not stop cleanly"
-            cat server.log
-            kill "$PID" 2>/dev/null || true
-            exit 1
-          fi
-          wait "$PID" || true
-          grep "Done (" server.log | tail -n 1
 
-      - name: Publish prerelease JAR
+            if [ "$PROFILE" = "extreme" ]; then
+              grep -q "Async Entity Tracker" server.log || {
+                echo "Extreme profile did not initialize async entity tracker"
+                cat server.log
+                exit 1
+              }
+            fi
+
+            echo "stop" >&3
+            for i in $(seq 1 30); do
+              if ! kill -0 "$PID" 2>/dev/null; then
+                break
+              fi
+              sleep 1
+            done
+
+            if kill -0 "$PID" 2>/dev/null; then
+              echo "Server did not stop cleanly for profile $PROFILE"
+              cat server.log
+              kill "$PID" 2>/dev/null || true
+              exit 1
+            fi
+
+            wait "$PID" || true
+            grep "Done (" server.log | tail -n 1
+            cd ..
+          }
+
+          run_smoke balanced 25569
+          run_smoke extreme 25570
+
+      - name: Publish versioned prerelease JAR
         if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="warext-optimized-26.3-build-${GITHUB_RUN_NUMBER}"
-          gh release create "$TAG"             artifacts/Warext-Studis-Optimized-Leaf-26.3.jar             artifacts/SHA256SUMS.txt             artifacts/UPSTREAM_COMMIT.txt             --title "Warext Optimized Leaf 26.3 Build ${GITHUB_RUN_NUMBER}"             --notes "Experimental performance build based on Leaf dev/26.3. Includes adaptive multi-core pathfinding/tracker work, lower tracker allocations, NodeEvaluator pool correctness, async mob-spawn recovery and save-integrity fixes. 26.3 upstream is still under development; benchmark before production deployment."             --prerelease
+          VERSION=$(tr -d '[:space:]' < build-tools/VERSION)
+          TAG="v$VERSION"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; skipping duplicate publication."
+            exit 0
+          fi
+
+          gh release create "$TAG" \
+            artifacts/Warext-Studis-Optimized-Leaf-26.3.jar \
+            artifacts/SHA256SUMS.txt \
+            artifacts/UPSTREAM_COMMIT.txt \
+            --title "Warext Optimized Leaf $VERSION" \
+            --notes-file RELEASE_NOTES.md \
+            --prerelease
