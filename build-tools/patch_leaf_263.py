@@ -2230,4 +2230,139 @@ replace_once(
 
 print("Stage 13: precipitation random-tick lookup optimization applied.")
 
+
+# 26) Final performance profile layer.
+# Balanced is the default for new configurations; extreme opts into the async entity tracker.
+profile_java = """package org.dreeam.leaf.performance;
+
+import java.util.Locale;
+
+public final class WarextPerformanceProfile {
+
+    public enum Mode {
+        COMPATIBILITY,
+        BALANCED,
+        EXTREME
+    }
+
+    private static final Mode MODE = parse(System.getProperty("warext.profile", "balanced"));
+
+    private WarextPerformanceProfile() {
+    }
+
+    private static Mode parse(final String value) {
+        if (value == null) {
+            return Mode.BALANCED;
+        }
+        return switch (value.trim().toLowerCase(Locale.ROOT)) {
+            case "compat", "compatibility", "safe" -> Mode.COMPATIBILITY;
+            case "extreme", "max", "maximum" -> Mode.EXTREME;
+            default -> Mode.BALANCED;
+        };
+    }
+
+    public static Mode mode() {
+        return MODE;
+    }
+
+    public static boolean isExtreme() {
+        return MODE == Mode.EXTREME;
+    }
+
+    public static boolean asyncPathfindingDefault() {
+        return MODE != Mode.COMPATIBILITY && Runtime.getRuntime().availableProcessors() >= 4;
+    }
+
+    public static boolean asyncTrackerDefault() {
+        return MODE == Mode.EXTREME && Runtime.getRuntime().availableProcessors() >= 6;
+    }
+
+    public static int trackerMinEntitiesPerTask() {
+        return MODE == Mode.EXTREME ? 32 : 64;
+    }
+}
+"""
+profile_path = root / "leaf-server/src/main/java/org/dreeam/leaf/performance/WarextPerformanceProfile.java"
+profile_path.parent.mkdir(parents=True, exist_ok=True)
+profile_path.write_text(profile_java, encoding="utf-8")
+print("[ok] Warext performance profiles")
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/async/AsyncPathfinding.java",
+    "    public static boolean enabled = false;",
+    "    public static boolean enabled = org.dreeam.leaf.performance.WarextPerformanceProfile.asyncPathfindingDefault();",
+    "balanced async pathfinding default",
+)
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/async/MultithreadedTracker.java",
+    "    public static boolean enabled = false;",
+    "    public static boolean enabled = org.dreeam.leaf.performance.WarextPerformanceProfile.asyncTrackerDefault();",
+    "extreme async tracker default",
+)
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/async/MultithreadedTracker.java",
+    '        enabled = globalConfig.getBoolean(basePath() + ".enabled", false);',
+    '        enabled = globalConfig.getBoolean(basePath() + ".enabled", enabled);',
+    "tracker profile-aware config default",
+)
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/async/MultithreadedTracker.java",
+    """        threads = globalConfig.getInt(basePath() + ".threads", 0);
+        if (threads <= 0) {""",
+    """        threads = globalConfig.getInt(basePath() + ".threads", 0);
+        minEntitiesPerTask = Math.max(16, globalConfig.getInt(
+            basePath() + ".min-entities-per-task",
+            org.dreeam.leaf.performance.WarextPerformanceProfile.trackerMinEntitiesPerTask()
+        ));
+        if (threads <= 0) {""",
+    "tracker adaptive task-size config",
+)
+
+# Extreme mode gives one additional CPU to async work on sufficiently large hosts while
+# still reserving at least one processor for the tick thread / GC / Netty.
+budget_file = "leaf-server/src/main/java/org/dreeam/leaf/performance/WarextCpuBudget.java"
+replace_once(
+    budget_file,
+    """        if (PROCESSORS >= 24) return 5;
+        if (PROCESSORS >= 16) return 4;
+        if (PROCESSORS >= 8) return 2;
+        return 1;""",
+    """        int reserved;
+        if (PROCESSORS >= 24) reserved = 5;
+        else if (PROCESSORS >= 16) reserved = 4;
+        else if (PROCESSORS >= 8) reserved = 2;
+        else reserved = 1;
+
+        if (WarextPerformanceProfile.isExtreme() && reserved > 1) {
+            reserved--;
+        }
+        return reserved;""",
+    "profile-aware CPU headroom",
+)
+
+replace_once(
+    budget_file,
+    """        final int budget = workerBudget();
+        return Math.max(1, Math.min(8, (budget * 35 + 99) / 100));""",
+    """        final int budget = workerBudget();
+        final int percent = WarextPerformanceProfile.isExtreme() ? 45 : 35;
+        return Math.max(1, Math.min(8, (budget * percent + 99) / 100));""",
+    "profile-aware pathfinding CPU share",
+)
+
+replace_once(
+    budget_file,
+    """        int path = pathfindingThreads();
+        int tracker = Math.max(1, Math.min(8, (budget * 35 + 99) / 100));""",
+    """        int path = pathfindingThreads();
+        final int percent = WarextPerformanceProfile.isExtreme() ? 45 : 35;
+        int tracker = Math.max(1, Math.min(8, (budget * percent + 99) / 100));""",
+    "profile-aware tracker CPU share",
+)
+
+print("Stage 14: finalized Warext performance profiles applied.")
+
 print("All Warext optimized Leaf 26.3 performance patches applied.")
