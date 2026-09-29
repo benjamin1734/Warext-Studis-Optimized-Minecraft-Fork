@@ -2010,4 +2010,178 @@ print("[ok] lock-free concurrent NodeEvaluator pools")
 
 print("Stage 11: concurrent NodeEvaluator pooling applied.")
 
+
+# 24) Async tracker packet batching: recycle per-connection packet lists instead of allocating
+#     fresh backing arrays every tick. Pools are per TrackerCtx and never retain connections.
+tracker_ctx = "leaf-server/src/main/java/org/dreeam/leaf/async/tracker/TrackerCtx.java"
+
+replace_once(
+    tracker_ctx,
+    """    @SuppressWarnings("unchecked")
+    private static final Object2ObjectFunction<ServerPlayerConnection, ObjectArrayList<Packet<?>>> INIT_PACKET_LIST = x -> ObjectArrayList.wrap(new Packet[16], 0);
+    private final Object2ObjectOpenHashMap<ServerPlayerConnection, ObjectArrayList<Packet<?>>> packets = new Object2ObjectOpenHashMap<>();""",
+    """    private static final int PACKET_LIST_POOL_LIMIT = 64;
+    private final Object2ObjectOpenHashMap<ServerPlayerConnection, ObjectArrayList<Packet<?>>> packets = new Object2ObjectOpenHashMap<>();
+    private final java.util.ArrayDeque<ObjectArrayList<Packet<?>>> packetListPool = new java.util.ArrayDeque<>();""",
+    "tracker packet-list pool fields",
+)
+
+replace_once(
+    tracker_ctx,
+    """    public void reset() {
+        this.packets.clear();
+        this.itemFrames.clear();""",
+    """    public void reset() {
+        this.recyclePacketLists(false);
+        this.itemFrames.clear();""",
+    "tracker reset recycles packet buffers",
+)
+
+replace_once(
+    tracker_ctx,
+    """    public void send(ServerPlayerConnection connection, Packet<?> packet) {
+        packets.computeIfAbsent(connection, INIT_PACKET_LIST).add(packet);
+    }""",
+    """    public void send(ServerPlayerConnection connection, Packet<?> packet) {
+        ObjectArrayList<Packet<?>> list = packets.get(connection);
+        if (list == null) {
+            list = this.packetListPool.pollFirst();
+            if (list == null) {
+                @SuppressWarnings("unchecked")
+                final Packet<?>[] backing = new Packet[16];
+                list = ObjectArrayList.wrap(backing, 0);
+            }
+            packets.put(connection, list);
+        }
+        list.add(packet);
+    }""",
+    "tracker packet-list reuse on send",
+)
+
+replace_once(
+    tracker_ctx,
+    """    Object2ObjectOpenHashMap<ServerPlayerConnection, ObjectArrayList<Packet<?>>> join(TrackerCtx other) {
+        itemFrames.addAll(other.itemFrames);
+        stopSeen.addAll(other.stopSeen);
+        startSeen.addAll(other.startSeen);
+        pluginEntity.addAll(other.pluginEntity);
+        resync.addAll(other.resync);
+        syncAttributes.addAll(other.syncAttributes);
+        updateData.addAll(other.updateData);
+        return other.packets;
+    }
+
+    void handle(Object2ObjectOpenHashMap<ServerPlayerConnection, ObjectArrayList<Packet<?>>>[] other) {""",
+    """    TrackerCtx join(TrackerCtx other) {
+        itemFrames.addAll(other.itemFrames);
+        stopSeen.addAll(other.stopSeen);
+        startSeen.addAll(other.startSeen);
+        pluginEntity.addAll(other.pluginEntity);
+        resync.addAll(other.resync);
+        syncAttributes.addAll(other.syncAttributes);
+        updateData.addAll(other.updateData);
+        return other;
+    }
+
+    void handle(TrackerCtx[] other) {""",
+    "tracker joins retain owning packet pools",
+)
+
+replace_once(
+    tracker_ctx,
+    """        for (Object2ObjectOpenHashMap<ServerPlayerConnection, ObjectArrayList<Packet<?>>> otherPackets : other) {
+            flush(world, otherPackets);
+        }""",
+    """        for (TrackerCtx otherContext : other) {
+            otherContext.flushPackets();
+        }""",
+    "tracker flushes through owning contexts",
+)
+
+replace_once(
+    tracker_ctx,
+    """        flush(world, this.packets);
+        if (!stopSeen.isEmpty()) {""",
+    """        this.flushPackets();
+        if (!stopSeen.isEmpty()) {""",
+    "tracker primary packet flush reuse",
+)
+
+replace_once(
+    tracker_ctx,
+    """        flush(world, this.packets);
+    }""",
+    """        this.flushPackets();
+    }""",
+    "tracker final packet flush reuse",
+)
+
+replace_once(
+    tracker_ctx,
+    """    private static void flush(ServerLevel world, Object2ObjectOpenHashMap<ServerPlayerConnection, ObjectArrayList<Packet<?>>> packets) {
+        if (packets.isEmpty()) {
+            return;
+        }
+        packets.forEach((conn, list) -> sendPacket(world, conn, list));
+        packets.clear();
+    }""",
+    """    private void flushPackets() {
+        if (this.packets.isEmpty()) {
+            return;
+        }
+        this.recyclePacketLists(true);
+    }
+
+    private void recyclePacketLists(final boolean send) {
+        if (this.packets.isEmpty()) {
+            return;
+        }
+        this.packets.forEach((conn, list) -> {
+            if (send) {
+                sendPacket(this.world, conn, list);
+            }
+            list.clear();
+            if (this.packetListPool.size() < PACKET_LIST_POOL_LIMIT) {
+                this.packetListPool.addLast(list);
+            }
+        });
+        this.packets.clear();
+    }""",
+    "tracker packet-list recycling flush",
+)
+
+# Remove import made obsolete by eliminating computeIfAbsent factory.
+data = read(tracker_ctx)
+data = data.replace("import it.unimi.dsi.fastutil.objects.Object2ObjectFunction;\\n", "")
+write(tracker_ctx, data)
+print("[ok] tracker packet-list factory import cleanup")
+
+async_tracker = "leaf-server/src/main/java/org/dreeam/leaf/async/tracker/AsyncTracker.java"
+replace_once(
+    async_tracker,
+    """            @SuppressWarnings("unchecked")
+            Object2ObjectOpenHashMap<ServerPlayerConnection, ObjectArrayList<Packet<?>>>[] packets = new Object2ObjectOpenHashMap[futures.length - 1];
+            for (int i = 1; i < futures.length; i++) {
+                packets[i - 1] = ctx.join(futures[i].get());
+            }
+            ctx.handle(packets);""",
+    """            TrackerCtx[] contexts = new TrackerCtx[futures.length - 1];
+            for (int i = 1; i < futures.length; i++) {
+                contexts[i - 1] = ctx.join(futures[i].get());
+            }
+            ctx.handle(contexts);""",
+    "tracker context-owned packet flush array",
+)
+
+# These imports were only needed for the old packet-map array in AsyncTracker.
+data = read(async_tracker)
+data = data.replace("import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap;\\n", "")
+data = data.replace("import it.unimi.dsi.fastutil.objects.ObjectArrayList;\\n", "")
+data = data.replace("import net.minecraft.network.protocol.Packet;\\n", "")
+data = data.replace("import net.minecraft.server.network.ServerPlayerConnection;\\n", "")
+write(async_tracker, data)
+print("[ok] tracker packet-map import cleanup")
+
+print("Stage 12: reusable tracker packet batching buffers applied.")
+
 print("All Warext optimized Leaf 26.3 performance patches applied.")
