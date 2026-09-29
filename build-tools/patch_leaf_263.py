@@ -1724,4 +1724,78 @@ replace_once(
 
 print("Stage 7: async pathfinding POI correctness/p99 fixes applied.")
 
+
+# 20) Tracker interpolation: accumulate predicted movement in primitives instead of allocating Vec3
+#     on every movement event / merge. Materialize at most one Vec3 when interpolation consumes it.
+tracker_input = """package org.dreeam.leaf.async.tracker;
+
+import net.minecraft.world.phys.Vec3;
+import org.jspecify.annotations.NullMarked;
+
+@NullMarked
+public final class TrackerInput {
+    public Vec3 trackingPosition;
+    private double predictedX;
+    private double predictedY;
+    private double predictedZ;
+    public boolean syncPosition;
+
+    public TrackerInput(final Vec3 trackingPosition, final Vec3 predictedDelta, final boolean syncPosition) {
+        this.trackingPosition = trackingPosition;
+        this.predictedX = predictedDelta.x;
+        this.predictedY = predictedDelta.y;
+        this.predictedZ = predictedDelta.z;
+        this.syncPosition = syncPosition;
+    }
+
+    public void applyPredictedMovement(final Vec3 delta) {
+        this.predictedX += delta.x;
+        this.predictedY += delta.y;
+        this.predictedZ += delta.z;
+    }
+
+    void apply(final TrackerInput v) {
+        this.trackingPosition = v.trackingPosition;
+        this.predictedX += v.predictedX;
+        this.predictedY += v.predictedY;
+        this.predictedZ += v.predictedZ;
+        if (v.syncPosition) {
+            this.syncPosition = true;
+        }
+    }
+
+    public Vec3 consumePredictedDelta() {
+        final double x = this.predictedX;
+        final double y = this.predictedY;
+        final double z = this.predictedZ;
+        this.predictedX = 0.0D;
+        this.predictedY = 0.0D;
+        this.predictedZ = 0.0D;
+        if (x == 0.0D && y == 0.0D && z == 0.0D) {
+            return Vec3.ZERO;
+        }
+        return new Vec3(x, y, z);
+    }
+}
+"""
+write("leaf-server/src/main/java/org/dreeam/leaf/async/tracker/TrackerInput.java", tracker_input)
+print("[ok] primitive tracker predicted-delta accumulator")
+
+replace_once(
+    "leaf-server/src/minecraft/java/net/minecraft/world/entity/SteppedInterpolationTracker.java",
+    """        final Vec3 predictedDelta = input.predictedDelta;
+        if (predictedDelta.lengthSqr() > 1.0E-5F) {
+            this.trackedSteps.replaceAll(step -> step.addDelta(predictedDelta));
+        }
+
+        input.predictedDelta = Vec3.ZERO;""",
+    """        final Vec3 predictedDelta = input.consumePredictedDelta();
+        if (predictedDelta.lengthSqr() > 1.0E-5F) {
+            this.trackedSteps.replaceAll(step -> step.addDelta(predictedDelta));
+        }""",
+    "tracker interpolation primitive delta consumption",
+)
+
+print("Stage 8: primitive tracker interpolation accumulation applied.")
+
 print("All Warext optimized Leaf 26.3 performance patches applied.")
