@@ -915,4 +915,273 @@ replace_once(
 
 print("Stage 3: collision, AsyncPath correctness, despawn/spawn allocation optimizations applied.")
 
+
+# 16) Async save scheduler: coalesce superseded saves per key and remove the unbounded duplicate-write pattern.
+async_save_class = """package org.dreeam.leaf.async;
+
+import net.minecraft.util.Util;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.dreeam.leaf.config.modules.async.AsyncPlayerDataSave;
+
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
+
+public class AsyncPlayerDataSaving {
+
+    private static final Logger LOGGER = LogManager.getLogger("Warext Async Save");
+    public static ExecutorService IO_POOL = null;
+    private static final ConcurrentHashMap<Object, LatestTask> LATEST_TASKS = new ConcurrentHashMap<>();
+
+    private static final class LatestTask {
+        private Runnable latest;
+        private boolean scheduled;
+        private CompletableFuture<Void> completion = CompletableFuture.completedFuture(null);
+    }
+
+    private AsyncPlayerDataSaving() {
+    }
+
+    public static synchronized void init() {
+        if (IO_POOL == null) {
+            IO_POOL = new ThreadPoolExecutor(
+                1,
+                1,
+                0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(),
+                new com.google.common.util.concurrent.ThreadFactoryBuilder()
+                    .setPriority(Thread.NORM_PRIORITY - 2)
+                    .setNameFormat("Warext Leaf IO Thread")
+                    .setUncaughtExceptionHandler(Util::onThreadException)
+                    .build(),
+                new ThreadPoolExecutor.AbortPolicy()
+            );
+        }
+    }
+
+    private static void ensurePool() {
+        if (IO_POOL == null) {
+            init();
+        }
+    }
+
+    public static Optional<Future<?>> submit(Runnable runnable) {
+        if (!AsyncPlayerDataSave.enabled) {
+            runnable.run();
+            return Optional.empty();
+        }
+        ensurePool();
+        return Optional.of(IO_POOL.submit(runnable));
+    }
+
+    /**
+     * Keeps at most one scheduled drain task per key. If multiple saves arrive while a save is
+     * queued/running, only the newest not-yet-started save is retained.
+     */
+    public static CompletableFuture<Void> submitLatest(final Object key, final Runnable runnable) {
+        if (!AsyncPlayerDataSave.enabled) {
+            runnable.run();
+            return CompletableFuture.completedFuture(null);
+        }
+
+        ensurePool();
+        final AtomicReference<CompletableFuture<Void>> completionRef = new AtomicReference<>();
+        LATEST_TASKS.compute(key, (ignored, existing) -> {
+            final LatestTask slot = existing == null ? new LatestTask() : existing;
+            synchronized (slot) {
+                slot.latest = runnable;
+                if (!slot.scheduled) {
+                    slot.scheduled = true;
+                    slot.completion = new CompletableFuture<>();
+                    final LatestTask scheduledSlot = slot;
+                    IO_POOL.execute(() -> drainLatest(key, scheduledSlot));
+                }
+                completionRef.set(slot.completion);
+            }
+            return slot;
+        });
+        return completionRef.get();
+    }
+
+    private static void drainLatest(final Object key, final LatestTask slot) {
+        while (true) {
+            final Runnable task;
+            synchronized (slot) {
+                task = slot.latest;
+                slot.latest = null;
+                if (task == null) {
+                    slot.scheduled = false;
+                    slot.completion.complete(null);
+                    break;
+                }
+            }
+
+            try {
+                task.run();
+            } catch (Throwable throwable) {
+                LOGGER.error("Async save task failed for key {}", key, throwable);
+            }
+        }
+
+        // Remove idle slots without racing a new submit for the same key.
+        LATEST_TASKS.compute(key, (ignored, current) -> {
+            if (current != slot) {
+                return current;
+            }
+            synchronized (slot) {
+                return !slot.scheduled && slot.latest == null ? null : slot;
+            }
+        });
+    }
+
+    /**
+     * Waits until all saves known for a key at the time of (and during) the wait are drained.
+     */
+    public static void awaitLatest(final Object key, final long timeoutMillis)
+        throws InterruptedException, ExecutionException, TimeoutException {
+        if (!AsyncPlayerDataSave.enabled) {
+            return;
+        }
+
+        final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+        while (true) {
+            final LatestTask slot = LATEST_TASKS.get(key);
+            if (slot == null) {
+                return;
+            }
+
+            final CompletableFuture<Void> completion;
+            synchronized (slot) {
+                if (!slot.scheduled && slot.latest == null) {
+                    return;
+                }
+                completion = slot.completion;
+            }
+
+            final long remaining = deadline - System.nanoTime();
+            if (remaining <= 0L) {
+                throw new TimeoutException("Timed out waiting for async save: " + key);
+            }
+            completion.get(remaining, TimeUnit.NANOSECONDS);
+        }
+    }
+}
+"""
+write("leaf-server/src/main/java/org/dreeam/leaf/async/AsyncPlayerDataSaving.java", async_save_class)
+print("[ok] coalescing async save scheduler")
+
+# Enable the now-safer async save path by default; users can still disable it in Leaf config.
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/async/AsyncPlayerDataSave.java",
+    "    public static boolean enabled = false;",
+    "    public static boolean enabled = true;",
+    "async save optimized default",
+)
+
+# Coalesce repeated level.dat writes by world path.
+replace_once(
+    "leaf-server/src/minecraft/java/net/minecraft/world/level/storage/LevelStorageSource.java",
+    """            org.dreeam.leaf.async.AsyncPlayerDataSaving.submit(() -> {
+                Path dataFile = null;""",
+    """            org.dreeam.leaf.async.AsyncPlayerDataSaving.submitLatest(worldDir, () -> {
+                Path dataFile = null;""",
+    "coalesce level.dat saves",
+)
+
+# Player saves no longer wait for the previous disk write before enqueueing. The scheduler keeps
+# the running save plus only the newest pending snapshot for the UUID.
+player_storage = "leaf-server/src/minecraft/java/net/minecraft/world/level/storage/PlayerDataStorage.java"
+replace_once(
+    player_storage,
+    "    private final java.util.Map<java.util.UUID, java.util.concurrent.Future<?>> savingLocks = new it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap<>(); // Leaf - Async playerdata saving\n",
+    "",
+    "remove racy player save future map",
+)
+
+replace_once(
+    player_storage,
+    """        lockFor(uniqueId, playerName);
+        synchronized (PlayerDataStorage.this) {
+            org.dreeam.leaf.async.AsyncPlayerDataSaving.submit(() -> {
+                Path tmpFile = null;
+                try {
+                    Path playerDirPath = this.playerDir.toPath();
+                    tmpFile = Files.createTempFile(playerDirPath, stringId + "-", ".dat");
+                    NbtIo.writeCompressed(compoundTag, tmpFile);
+                    Path realFile = playerDirPath.resolve(stringId + ".dat");
+                    Path oldFile = playerDirPath.resolve(stringId + ".dat_old");
+                    Util.safeReplaceFile(realFile, tmpFile, oldFile);
+                } catch (Exception var7) {
+                    LOGGER.warn("Failed to save player data for {}", playerName, var7);
+                    if (tmpFile != null) {
+                        try {
+                            Files.deleteIfExists(tmpFile);
+                        } catch (Exception ignored) {
+                        }
+                    }
+                } finally {
+                    synchronized (PlayerDataStorage.this) {
+                        savingLocks.remove(uniqueId);
+                    }
+                }
+            }).ifPresent(future -> savingLocks.put(uniqueId, future));
+        }""",
+    """        org.dreeam.leaf.async.AsyncPlayerDataSaving.submitLatest(uniqueId, () -> {
+            Path tmpFile = null;
+            try {
+                Path playerDirPath = this.playerDir.toPath();
+                tmpFile = Files.createTempFile(playerDirPath, stringId + "-", ".dat");
+                NbtIo.writeCompressed(compoundTag, tmpFile);
+                Path realFile = playerDirPath.resolve(stringId + ".dat");
+                Path oldFile = playerDirPath.resolve(stringId + ".dat_old");
+                Util.safeReplaceFile(realFile, tmpFile, oldFile);
+            } catch (Exception var7) {
+                LOGGER.warn("Failed to save player data for {}", playerName, var7);
+                if (tmpFile != null) {
+                    try {
+                        Files.deleteIfExists(tmpFile);
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+        });""",
+    "coalesce player saves without main-thread predecessor wait",
+)
+
+# Keep load/backup ordering guarantees, but without cancellation/removal races between old/new Futures.
+start_marker = "    private void lockFor(final java.util.UUID uniqueId, final String playerName) {"
+end_marker = "    // Leaf end - Async playerdata saving"
+data = read(player_storage)
+start = data.find(start_marker)
+if start < 0:
+    raise RuntimeError("player save lockFor start not found")
+end = data.find(end_marker, start)
+if end < 0:
+    raise RuntimeError("player save lockFor end not found")
+replacement = """    private void lockFor(final java.util.UUID uniqueId, final String playerName) {
+        try {
+            org.dreeam.leaf.async.AsyncPlayerDataSaving.awaitLatest(uniqueId, 10_000L);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            LOGGER.warn("Interrupted while waiting for player data save for {}", playerName, exception);
+        } catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException exception) {
+            LOGGER.warn("Timed out or failed while waiting for player data save for {}", playerName, exception);
+        }
+    }
+"""
+data = data[:start] + replacement + data[end:]
+write(player_storage, data)
+print("[ok] race-free player save ordering wait")
+
+print("Stage 4: async-save coalescing/backpressure optimization applied.")
+
 print("All Warext optimized Leaf 26.3 performance patches applied.")
