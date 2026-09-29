@@ -2333,4 +2333,42 @@ replace_once(
 
 print("Stage 14: async path behavior lifecycle cleanup applied.")
 
+
+# 27) Cache Entity#getEncodeId(): entity type is immutable for an entity's lifetime, so repeated
+#     registry/string construction is unnecessary. Null remains uncached for non-serializable entities.
+entity_java = "leaf-server/src/minecraft/java/net/minecraft/world/entity/Entity.java"
+
+replace_once(
+    entity_java,
+    """    private final boolean shouldSkipBaseDespawnCheck = this instanceof net.minecraft.world.entity.projectile.ThrowableProjectile; // Leaf - Rewrite entity despawn time""",
+    """    private final boolean shouldSkipBaseDespawnCheck = this instanceof net.minecraft.world.entity.projectile.ThrowableProjectile; // Leaf - Rewrite entity despawn time
+    private @Nullable String warext$cachedEncodeId;""",
+    "entity encode-id cache field",
+)
+
+data = read(entity_java)
+needle = """    public final @Nullable String getEncodeId() {
+        // Paper start - Raw entity serialization API
+        return this.getEncodeId(false);
+    }"""
+replacement = """    public final @Nullable String getEncodeId() {
+        String cached = this.warext$cachedEncodeId;
+        if (cached != null) {
+            return cached;
+        }
+        // Paper start - Raw entity serialization API
+        cached = this.getEncodeId(false);
+        if (cached != null) {
+            this.warext$cachedEncodeId = cached;
+        }
+        return cached;
+    }"""
+if data.count(needle) != 1:
+    raise RuntimeError(f"Entity#getEncodeId cache target: expected 1 match, got {data.count(needle)}")
+data = data.replace(needle, replacement, 1)
+write(entity_java, data)
+print("[ok] cached entity encode id")
+
+print("Stage 15: immutable entity encode-id caching applied.")
+
 print("All Warext optimized Leaf 26.3 performance patches applied.")
