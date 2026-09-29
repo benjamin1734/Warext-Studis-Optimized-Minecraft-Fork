@@ -2570,4 +2570,36 @@ replace_once(
 
 print("Stage 17: reusable tracker Future/join arrays applied.")
 
+
+# 30) Clear ThreadLocal light packet buffer references after cloning.
+# Ported from Leaf PR #940 (Clear light buffer refs). This prevents worker/thread-local buffers
+# from retaining the last large section-light byte arrays after packet construction.
+light_packet = "leaf-server/src/minecraft/java/net/minecraft/network/protocol/game/ClientboundLightUpdatePacketData.java"
+
+replace_once(
+    light_packet,
+    """            for (int i = 0; i < skyCount; i++) {
+                this.skyUpdates[i] = skyBuffer[i].clone();
+            }""",
+    """            for (int i = 0; i < skyCount; i++) {
+                this.skyUpdates[i] = skyBuffer[i].clone();
+                skyBuffer[i] = null; // Warext - Leaf PR #940: release ThreadLocal retained ref
+            }""",
+    "release sky light ThreadLocal buffer refs",
+)
+
+replace_once(
+    light_packet,
+    """            for (int i = 0; i < blockCount; i++) {
+                this.blockUpdates[i] = blockBuffer[i].clone();
+            }""",
+    """            for (int i = 0; i < blockCount; i++) {
+                this.blockUpdates[i] = blockBuffer[i].clone();
+                blockBuffer[i] = null; // Warext - Leaf PR #940: release ThreadLocal retained ref
+            }""",
+    "release block light ThreadLocal buffer refs",
+)
+
+print("Stage 18: light packet ThreadLocal reference cleanup applied.")
+
 print("All Warext optimized Leaf 26.3 performance patches applied.")
