@@ -2424,4 +2424,150 @@ replace_once(
 
 print("Stage 16: pathfinding burst queue and evaluator retention limits applied.")
 
+
+# 29) Async tracker: reuse Future[] and join-context arrays across ticks.
+# Task objects themselves remain per-tick, but these two wrapper arrays no longer churn when
+# the task count is stable (which is the normal case under a steady entity count).
+async_tracker = "leaf-server/src/main/java/org/dreeam/leaf/async/tracker/AsyncTracker.java"
+
+replace_once(
+    async_tracker,
+    """    private Future<TrackerCtx> @Nullable [] fut;""",
+    """    @SuppressWarnings("unchecked")
+    private Future<TrackerCtx>[] futureBuffer = new Future[0];
+    private TrackerCtx[] joinBuffer = new TrackerCtx[0];
+    private int futureCount;
+    private boolean futuresPending;""",
+    "tracker reusable future/join buffers fields",
+)
+
+replace_once(
+    async_tracker,
+    """        @SuppressWarnings("unchecked")
+        Future<TrackerCtx>[] futures = new Future[taskCount];
+
+        int cursor = 0;""",
+    """        if (this.futureBuffer.length != taskCount) {
+            @SuppressWarnings("unchecked")
+            Future<TrackerCtx>[] resized = new Future[taskCount];
+            this.futureBuffer = resized;
+        }
+        final Future<TrackerCtx>[] futures = this.futureBuffer;
+        this.futureCount = taskCount;
+        this.futuresPending = true;
+
+        int cursor = 0;""",
+    "tracker Future array reuse",
+)
+
+replace_once(
+    async_tracker,
+    """        exec.unpark();
+        this.fut = futures;""",
+    """        exec.unpark();""",
+    "tracker remove transient Future array assignment",
+)
+
+replace_once(
+    async_tracker,
+    """    public void onEntitiesTickEnd() {
+        Future<TrackerCtx>[] task = this.fut;
+        if (task == null) {
+            return;
+        }
+        for (final Future<TrackerCtx> fut : task) {
+            if (!fut.isDone()) {
+                return;
+            }
+        }
+        this.fut = null;
+        handle(task);
+    }
+
+    public void onTickEnd() {
+        Future<TrackerCtx>[] task = this.fut;
+        this.fut = null;
+        if (task == null) {
+            return;
+        }
+        handle(task);
+    }""",
+    """    public void onEntitiesTickEnd() {
+        if (!this.futuresPending) {
+            return;
+        }
+        final Future<TrackerCtx>[] task = this.futureBuffer;
+        final int count = this.futureCount;
+        for (int i = 0; i < count; i++) {
+            if (!task[i].isDone()) {
+                return;
+            }
+        }
+        this.futuresPending = false;
+        handle(task, count);
+    }
+
+    public void onTickEnd() {
+        if (!this.futuresPending) {
+            return;
+        }
+        this.futuresPending = false;
+        handle(this.futureBuffer, this.futureCount);
+    }""",
+    "tracker active future count handling",
+)
+
+replace_once(
+    async_tracker,
+    """    private void handle(final Future<TrackerCtx>[] futures) {
+        try {
+            TrackerCtx ctx = futures[0].get();
+            TrackerCtx[] contexts = new TrackerCtx[futures.length - 1];
+            for (int i = 1; i < futures.length; i++) {
+                contexts[i - 1] = ctx.join(futures[i].get());
+            }
+            ctx.handle(contexts);
+
+            for (Future<TrackerCtx> future : futures) {
+                TrackerCtx completed = future.get();
+                completed.reset();
+                this.trackerCtxPool.addLast(completed);
+            }
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (final ExecutionException e) {
+            throw new RuntimeException(e);
+        }
+    }""",
+    """    private void handle(final Future<TrackerCtx>[] futures, final int count) {
+        try {
+            TrackerCtx ctx = futures[0].get();
+            final int joinedCount = count - 1;
+            if (this.joinBuffer.length != joinedCount) {
+                this.joinBuffer = new TrackerCtx[joinedCount];
+            }
+            final TrackerCtx[] contexts = this.joinBuffer;
+            for (int i = 1; i < count; i++) {
+                contexts[i - 1] = ctx.join(futures[i].get());
+            }
+            ctx.handle(contexts);
+
+            for (int i = 0; i < count; i++) {
+                TrackerCtx completed = futures[i].get();
+                futures[i] = null;
+                completed.reset();
+                this.trackerCtxPool.addLast(completed);
+            }
+            java.util.Arrays.fill(contexts, null);
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (final ExecutionException e) {
+            throw new RuntimeException(e);
+        }
+    }""",
+    "tracker join/future wrapper array reuse",
+)
+
+print("Stage 17: reusable tracker Future/join arrays applied.")
+
 print("All Warext optimized Leaf 26.3 performance patches applied.")
