@@ -1747,4 +1747,97 @@ replace_once(
 
 print("Stage 8: primitive tracker interpolation accumulation applied.")
 
+
+# 21) Shared Warext CPU budget: pathfinding/tracker auto mode draw from the same conservative
+#     processor budget instead of independently scaling to the machine size.
+cpu_budget = """package org.dreeam.leaf.performance;
+
+public final class WarextCpuBudget {
+
+    private static final int PROCESSORS = Math.max(1, Runtime.getRuntime().availableProcessors());
+
+    private WarextCpuBudget() {
+    }
+
+    public static int processors() {
+        return PROCESSORS;
+    }
+
+    public static int reservedCores() {
+        final int property = Integer.getInteger("warext.cpu.reserve", -1);
+        if (property >= 0) {
+            return Math.min(property, Math.max(0, PROCESSORS - 1));
+        }
+        if (PROCESSORS >= 24) return 5;
+        if (PROCESSORS >= 16) return 4;
+        if (PROCESSORS >= 8) return 2;
+        return 1;
+    }
+
+    public static int workerBudget() {
+        return Math.max(1, PROCESSORS - reservedCores());
+    }
+
+    public static int pathfindingThreads() {
+        final int override = Integer.getInteger("warext.cpu.pathfinding-threads", 0);
+        if (override > 0) return Math.max(1, override);
+
+        final int budget = workerBudget();
+        return Math.max(1, Math.min(8, (budget * 35 + 99) / 100));
+    }
+
+    public static int trackerThreads() {
+        final int override = Integer.getInteger("warext.cpu.tracker-threads", 0);
+        if (override > 0) return Math.max(1, override);
+
+        final int budget = workerBudget();
+        int path = pathfindingThreads();
+        int tracker = Math.max(1, Math.min(8, (budget * 35 + 99) / 100));
+
+        // Keep automatic path + tracker allocations inside the shared worker budget where possible.
+        if (budget > 1 && path + tracker > budget) {
+            tracker = Math.max(1, budget - path);
+        }
+        return tracker;
+    }
+
+    public static int backgroundHeadroom() {
+        return Math.max(0, workerBudget() - pathfindingThreads() - trackerThreads());
+    }
+}
+"""
+budget_path = root / "leaf-server/src/main/java/org/dreeam/leaf/performance/WarextCpuBudget.java"
+budget_path.parent.mkdir(parents=True, exist_ok=True)
+budget_path.write_text(cpu_budget, encoding="utf-8")
+print("[ok] shared Warext CPU budget")
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/async/AsyncPathfinding.java",
+    """        if (asyncPathfindingMaxThreads <= 0) {
+            final int reservedCores = availableProcessors >= 12 ? 3 : (availableProcessors >= 6 ? 2 : 1);
+            final int workerBudget = Math.max(1, availableProcessors - reservedCores);
+            asyncPathfindingMaxThreads = Math.max(1, Math.min(6, workerBudget / 3));
+        }""",
+    """        if (asyncPathfindingMaxThreads <= 0) {
+            asyncPathfindingMaxThreads = org.dreeam.leaf.performance.WarextCpuBudget.pathfindingThreads();
+        }""",
+    "pathfinding shared CPU budget",
+)
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/config/modules/async/MultithreadedTracker.java",
+    """        if (threads <= 0) {
+            final int availableProcessors = Runtime.getRuntime().availableProcessors();
+            final int reservedCores = availableProcessors >= 12 ? 3 : (availableProcessors >= 6 ? 2 : 1);
+            final int workerBudget = Math.max(1, availableProcessors - reservedCores);
+            threads = Math.max(1, Math.min(6, workerBudget / 2));
+        }""",
+    """        if (threads <= 0) {
+            threads = org.dreeam.leaf.performance.WarextCpuBudget.trackerThreads();
+        }""",
+    "tracker shared CPU budget",
+)
+
+print("Stage 9: shared adaptive multi-core CPU budget applied.")
+
 print("All Warext optimized Leaf 26.3 performance patches applied.")
