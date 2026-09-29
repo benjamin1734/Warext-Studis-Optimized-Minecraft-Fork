@@ -27,7 +27,7 @@ For high-entity servers where maximum tick throughput matters more than conserva
 java -Dwarext.profile=extreme -Xms4G -Xmx4G -jar Warext-Studis-Optimized-Leaf-26.3.jar nogui
 ```
 
-Extreme enables the optimized multi-threaded entity tracker and gives a larger share of the shared async CPU budget to pathfinding/tracking.
+Extreme enables the optimized multi-threaded entity tracker, experimental entity-activation/random-tick/sleeping-block-entity/DAB optimizers, and gives a larger share of the shared async CPU budget to pathfinding/tracking.
 
 ### Compatibility
 
@@ -62,7 +62,8 @@ The automatic scheduler reserves CPU headroom instead of letting every subsystem
 - ChunkCache p99 rehash-spike avoidance.
 - Collision buffer reuse.
 - Random-tick/precipitation lookup reuse.
-- Runtime Java 25 startup/shutdown smoke tests.
+- Runtime Java 25 startup/shutdown smoke tests for both balanced and extreme profiles.
+- Reproducible builds pinned to a tested Leaf commit.
 
 ## Validation
 
