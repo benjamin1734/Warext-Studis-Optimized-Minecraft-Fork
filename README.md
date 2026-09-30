@@ -5,7 +5,7 @@ High-performance Minecraft server engine focused on low MSPT, low p95/p99 tick l
 ## Current target
 - Minecraft line: 26.3
 - Java: 25
-- Release line: `26.3-exp.2`
+- Release line: `26.3-exp.3`
 - Goal: minimize MSPT, p95/p99 tick latency, CPU time per tick, allocation/GC pressure and RAM use while preserving broad Paper ecosystem compatibility.
 
 ## Performance profiles
@@ -17,7 +17,7 @@ Recommended general-purpose profile.
 java -Dwarext.profile=balanced -Xms4G -Xmx4G -jar Warext-Server-Engine-26.3.jar nogui
 ```
 
-Balanced enables optimized async pathfinding automatically on suitable multi-core CPUs, keeps CPU headroom for the main tick thread/GC/networking and leaves the experimental async entity tracker disabled by default.
+Balanced enables optimized async pathfinding automatically on suitable multi-core CPUs, enables Dynamic Activation of Brain with its compatibility blacklist, keeps extra CPU headroom on 4-vCPU hosts for the main tick thread/GC/networking, and leaves the experimental async entity tracker disabled by default.
 
 ### Extreme
 For high-entity servers where maximum tick throughput matters more than conservative compatibility.
@@ -64,6 +64,7 @@ The automatic scheduler reserves CPU headroom instead of letting every subsystem
 - Async path lifecycle cleanup and bounded path queues.
 - Entity encode-id caching.
 - Light packet ThreadLocal retention cleanup.
+- VoxelBench-driven 4-vCPU scheduler tuning, balanced DAB defaults, Alternate Current defaults for new configs, and chunk-packet metadata allocation reductions.
 - Runtime Java 25 startup/shutdown smoke tests for both balanced and extreme profiles.
 - Reproducible builds pinned to a tested upstream commit.
 
