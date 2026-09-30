@@ -2762,4 +2762,231 @@ replace_once(
 
 print("Finalization: Warext balanced/extreme performance profiles applied.")
 
+
+
+# 32) Product-facing Warext Server Engine branding.
+# Keep upstream package/class names where compatibility requires them, but do not expose the
+# upstream project name as the product identity in runtime brand, commands, config headers,
+# replay metadata, manifests, or user-facing diagnostics.
+server_brand = "leaf-server/src/main/java/org/dreeam/leaf/config/modules/misc/ServerBrand.java"
+replace_once(
+    server_brand,
+    """    public static String serverModName = io.papermc.paper.ServerBuildInfo.buildInfo().brandName();
+    public static String serverGUIName = io.papermc.paper.ServerBuildInfo.buildInfo().brandName() + " Console";""",
+    """    public static String serverModName = "Warext Server Engine";
+    public static String serverGUIName = "Warext Server Engine Console";""",
+    "Warext runtime server brand defaults",
+)
+replace_once(
+    server_brand,
+    """        serverModName = globalConfig.getString(basePath() + ".server-mod-name", serverModName);
+        serverGUIName = globalConfig.getString(basePath() + ".server-gui-name", serverGUIName);""",
+    """        serverModName = globalConfig.getString(basePath() + ".server-mod-name", serverModName);
+        serverGUIName = globalConfig.getString(basePath() + ".server-gui-name", serverGUIName);
+        if ("Leaf".equalsIgnoreCase(serverModName)) {
+            serverModName = "Warext Server Engine";
+        }
+        if ("Leaf Console".equalsIgnoreCase(serverGUIName)) {
+            serverGUIName = "Warext Server Engine Console";
+        }""",
+    "migrate legacy runtime brand values",
+)
+
+leaf_command = "leaf-server/src/main/java/org/dreeam/leaf/command/LeafCommand.java"
+replace_once(
+    leaf_command,
+    '    public static final String COMMAND_LABEL = "leaf";',
+    '    public static final String COMMAND_LABEL = "warext";',
+    "Warext command label",
+)
+replace_once(
+    leaf_command,
+    '    public static final String BASE_PERM = LeafCommands.COMMAND_BASE_PERM + "." + COMMAND_LABEL;',
+    '    public static final String BASE_PERM = LeafCommands.COMMAND_BASE_PERM;',
+    "Warext command permission root",
+)
+replace_once(
+    leaf_command,
+    '        this.description = "Leaf related commands";',
+    '        this.description = "Warext Server Engine commands";',
+    "Warext command description",
+)
+
+leaf_commands = "leaf-server/src/main/java/org/dreeam/leaf/command/LeafCommands.java"
+replace_once(
+    leaf_commands,
+    '    public static final String COMMAND_BASE_PERM = CraftDefaultPermissions.LEAF_ROOT + ".command";',
+    '    public static final String COMMAND_BASE_PERM = "warext.command";',
+    "Warext command permission namespace",
+)
+replace_once(
+    leaf_commands,
+    '        COMMANDS.forEach((s, command) -> server.server.getCommandMap().register(s, "Leaf", command));',
+    '        COMMANDS.forEach((s, command) -> server.server.getCommandMap().register(s, "Warext", command));',
+    "Warext command fallback namespace",
+)
+
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/command/subcommands/MSPTCommand.java",
+    '                .content("Please enable it in your Leaf configuration to use this command.")',
+    '                .content("Please enable it in your Warext Server Engine configuration to use this command.")',
+    "Warext MSPT configuration message",
+)
+
+leaf_config = "leaf-server/src/main/java/org/dreeam/leaf/config/LeafConfig.java"
+replace_once(
+    leaf_config,
+    '    protected static final String GLOBAL_CONFIG_FILE = "leaf-global.yml";',
+    '    protected static final String GLOBAL_CONFIG_FILE = "warext-global.yml";',
+    "Warext global config filename",
+)
+replace_once(
+    leaf_config,
+    '    protected static final String DEFAULT_WORLD_CONFIG_FILE = "leaf-world-defaults.yml"; // Leaf TODO - Per world config',
+    '    protected static final String DEFAULT_WORLD_CONFIG_FILE = "warext-world-defaults.yml"; // upstream TODO - Per world config',
+    "Warext world config filename",
+)
+replace_once(
+    leaf_config,
+    '            "config/leaf-global.yml",',
+    '            "config/warext-global.yml",',
+    "Warext spark config filename",
+)
+replace_once(
+    leaf_config,
+    """        globalConfig = new LeafGlobalConfig(init);""",
+    """        final Path warextGlobalConfig = CONFIG_DIRECTORY.toPath().resolve(GLOBAL_CONFIG_FILE);
+        final Path legacyGlobalConfig = CONFIG_DIRECTORY.toPath().resolve("leaf-global.yml");
+        if (!Files.exists(warextGlobalConfig) && Files.exists(legacyGlobalConfig)) {
+            Files.move(legacyGlobalConfig, warextGlobalConfig, StandardCopyOption.REPLACE_EXISTING);
+            LOGGER.info("Migrated legacy upstream configuration to {}", warextGlobalConfig);
+        }
+
+        globalConfig = new LeafGlobalConfig(init);""",
+    "migrate legacy global config filename",
+)
+
+global_config = "leaf-server/src/main/java/org/dreeam/leaf/config/LeafGlobalConfig.java"
+data = read(global_config)
+old_comment = """        configFile.addComments("config-version", pickStringRegionBased(\"\"\"
+                Leaf Config
+
+                Website: https://www.leafmc.one/
+                Docs: https://www.leafmc.one/docs/getting-started
+                GitHub Repo: https://github.com/Winds-Studio/Leaf
+                Discord: https://discord.com/invite/gfgAwdSEuM\"\"\",
+            \"\"\"
+                Leaf 配置
+
+                官网: https://www.leafmc.one/zh/
+                文档: https://www.leafmc.one/zh/docs/getting-started
+                GitHub 仓库: https://github.com/Winds-Studio/Leaf
+                QQ社区群: 619278377\"\"\"));"""
+new_comment = """        configFile.addComments("config-version", pickStringRegionBased(\"\"\"
+                Warext Server Engine Configuration
+
+                Project: https://github.com/benjamin1734/Warext-Studis-Optimized-Minecraft-Fork
+                Releases: https://github.com/benjamin1734/Warext-Studis-Optimized-Minecraft-Fork/releases\"\"\",
+            \"\"\"
+                Warext Server Engine 配置
+
+                项目: https://github.com/benjamin1734/Warext-Studis-Optimized-Minecraft-Fork
+                发布: https://github.com/benjamin1734/Warext-Studis-Optimized-Minecraft-Fork/releases\"\"\"));"""
+if data.count(old_comment) != 1:
+    raise RuntimeError(f"Warext config header: expected 1 match, got {data.count(old_comment)}")
+write(global_config, data.replace(old_comment, new_comment, 1))
+print("[ok] Warext config header")
+
+version_fetcher = """package org.dreeam.leaf.version;
+
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
+import org.galemc.gale.version.AbstractPaperVersionFetcher;
+
+public class LeafVersionFetcher extends AbstractPaperVersionFetcher {
+
+    public static final String DOWNLOAD_PAGE = "https://github.com/benjamin1734/Warext-Studis-Optimized-Minecraft-Fork/releases";
+
+    public LeafVersionFetcher() {
+        super(
+            DOWNLOAD_PAGE,
+            "Warext Studios",
+            "Warext Server Engine",
+            "benjamin1734",
+            "Warext-Studis-Optimized-Minecraft-Fork",
+            ApiType.GITHUB
+        );
+    }
+
+    @Override
+    public Component getVersionMessage() {
+        return Component.text("* Warext Server Engine experimental build", NamedTextColor.GREEN)
+            .append(Component.newline())
+            .append(Component.text("Releases: " + DOWNLOAD_PAGE, NamedTextColor.GOLD));
+    }
+}
+"""
+write("leaf-server/src/main/java/org/dreeam/leaf/version/LeafVersionFetcher.java", version_fetcher)
+print("[ok] Warext version output")
+
+for replay_file in [
+    "leaf-server/src/main/java/org/leavesmc/leaves/replay/RecorderOption.java",
+    "leaf-server/src/main/java/org/leavesmc/leaves/replay/RecordMetaData.java",
+    "leaf-api/src/main/java/org/leavesmc/leaves/replay/BukkitRecorderOption.java",
+]:
+    data = read(replay_file)
+    old = 'public String serverName = "Leaf";'
+    if old not in data:
+        raise RuntimeError(f"Warext replay brand: missing target in {replay_file}")
+    write(replay_file, data.replace(old, 'public String serverName = "Warext Server Engine";', 1))
+    print(f"[ok] Warext replay brand: {replay_file}")
+
+build_file = root / "leaf-server/build.gradle.kts"
+if not build_file.exists():
+    raise RuntimeError("Generated leaf-server/build.gradle.kts missing after upstream patch application")
+data = build_file.read_text(encoding="utf-8")
+for old, new, label in [
+    ('"Implementation-Title" to "Leaf"', '"Implementation-Title" to "Warext Server Engine"', "manifest implementation title"),
+    ('"Specification-Title" to "Leaf"', '"Specification-Title" to "Warext Server Engine"', "manifest specification title"),
+    ('"Specification-Vendor" to "Winds Studio"', '"Specification-Vendor" to "Warext Studios"', "manifest vendor"),
+    ('"Brand-Id" to "winds-studio:leaf"', '"Brand-Id" to "warext:server-engine"', "manifest brand id"),
+    ('"Brand-Name" to "Leaf"', '"Brand-Name" to "Warext Server Engine"', "manifest brand name"),
+]:
+    if data.count(old) != 1:
+        raise RuntimeError(f"{label}: expected 1 match in generated build file, got {data.count(old)}")
+    data = data.replace(old, new, 1)
+build_file.write_text(data, encoding="utf-8")
+print("[ok] Warext JAR manifest branding")
+
+# User-facing diagnostics that survive the upstream patch stack.
+optional_replacements = [
+    (
+        "paper-server/src/main/java/org/spigotmc/WatchdogThread.java",
+        "If you think this is a Leaf bug, please report it at https://github.com/Winds-Studio/Leaf/issues",
+        "If you think this is a Warext Server Engine issue, please report it at https://github.com/benjamin1734/Warext-Studis-Optimized-Minecraft-Fork/issues",
+        "Warext watchdog diagnostics",
+    ),
+    (
+        "leaf-server/src/minecraft/java/net/minecraft/world/level/chunk/storage/RegionFileStorage.java",
+        "DO NOT REPORT THIS TO PAPER OR LEAF",
+        "DO NOT REPORT THIS TO PAPER OR WAREXT SERVER ENGINE",
+        "Warext region diagnostics product name",
+    ),
+    (
+        "leaf-server/src/minecraft/java/net/minecraft/world/level/chunk/storage/RegionFileStorage.java",
+        "If you think this is a Leaf bug, please report it at https://github.com/Winds-Studio/Leaf/issues",
+        "If you think this is a Warext Server Engine issue, please report it at https://github.com/benjamin1734/Warext-Studis-Optimized-Minecraft-Fork/issues",
+        "Warext region diagnostics issue link",
+    ),
+]
+for rel, old, new, label in optional_replacements:
+    path = root / rel
+    if path.exists():
+        data = path.read_text(encoding="utf-8")
+        if old in data:
+            path.write_text(data.replace(old, new), encoding="utf-8")
+            print(f"[ok] {label}")
+
+print("Branding: Warext Server Engine product identity applied.")
+
 print("All Warext Server Engine 26.3 performance patches applied.")
