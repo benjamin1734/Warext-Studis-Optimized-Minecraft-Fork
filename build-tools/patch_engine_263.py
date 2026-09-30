@@ -2811,7 +2811,172 @@ replace_once(
 print("Stage 19: VoxelBench baseline tail-latency tuning applied.")
 
 
-# 33) Product-facing Warext Server Engine branding.
+# 33) NBT network allocation: avoid constructing a ByteBufOutputStream wrapper for every NBT
+# write. VoxelBench serializes tens of thousands of objects in this workload, so even a small
+# per-object wrapper becomes measurable allocation/GC pressure. The adapter is per-thread and
+# clears its ByteBuf reference in finally to avoid retaining packet buffers.
+nbt_data_output = """package org.dreeam.leaf.performance;
+
+import io.netty.buffer.ByteBuf;
+import net.minecraft.nbt.NbtIo;
+import net.minecraft.nbt.Tag;
+
+import java.io.DataOutput;
+import java.io.IOException;
+import java.io.UTFDataFormatException;
+
+public final class WarextNbtDataOutput implements DataOutput {
+
+    private static final ThreadLocal<WarextNbtDataOutput> LOCAL =
+        ThreadLocal.withInitial(WarextNbtDataOutput::new);
+
+    private ByteBuf output;
+
+    private WarextNbtDataOutput() {
+    }
+
+    public static void writeAnyTag(final Tag tag, final ByteBuf output) throws IOException {
+        final WarextNbtDataOutput dataOutput = LOCAL.get();
+        dataOutput.output = output;
+        try {
+            NbtIo.writeAnyTag(tag, dataOutput);
+        } finally {
+            dataOutput.output = null;
+        }
+    }
+
+    private ByteBuf output() {
+        final ByteBuf current = this.output;
+        if (current == null) {
+            throw new IllegalStateException("Warext NBT output used outside an active write");
+        }
+        return current;
+    }
+
+    @Override
+    public void write(final int value) {
+        output().writeByte(value);
+    }
+
+    @Override
+    public void write(final byte[] bytes) {
+        output().writeBytes(bytes);
+    }
+
+    @Override
+    public void write(final byte[] bytes, final int offset, final int length) {
+        output().writeBytes(bytes, offset, length);
+    }
+
+    @Override
+    public void writeBoolean(final boolean value) {
+        output().writeBoolean(value);
+    }
+
+    @Override
+    public void writeByte(final int value) {
+        output().writeByte(value);
+    }
+
+    @Override
+    public void writeShort(final int value) {
+        output().writeShort(value);
+    }
+
+    @Override
+    public void writeChar(final int value) {
+        output().writeChar(value);
+    }
+
+    @Override
+    public void writeInt(final int value) {
+        output().writeInt(value);
+    }
+
+    @Override
+    public void writeLong(final long value) {
+        output().writeLong(value);
+    }
+
+    @Override
+    public void writeFloat(final float value) {
+        output().writeFloat(value);
+    }
+
+    @Override
+    public void writeDouble(final double value) {
+        output().writeDouble(value);
+    }
+
+    @Override
+    public void writeBytes(final String value) {
+        final ByteBuf buffer = output();
+        for (int i = 0, length = value.length(); i < length; i++) {
+            buffer.writeByte(value.charAt(i));
+        }
+    }
+
+    @Override
+    public void writeChars(final String value) {
+        final ByteBuf buffer = output();
+        for (int i = 0, length = value.length(); i < length; i++) {
+            buffer.writeChar(value.charAt(i));
+        }
+    }
+
+    @Override
+    public void writeUTF(final String value) throws IOException {
+        final int charLength = value.length();
+        int utfLength = 0;
+
+        for (int i = 0; i < charLength; i++) {
+            final int c = value.charAt(i);
+            if (c >= 0x0001 && c <= 0x007F) {
+                utfLength++;
+            } else if (c > 0x07FF) {
+                utfLength += 3;
+            } else {
+                utfLength += 2;
+            }
+        }
+
+        if (utfLength > 65535) {
+            throw new UTFDataFormatException("encoded string too long: " + utfLength + " bytes");
+        }
+
+        final ByteBuf buffer = output();
+        buffer.writeShort(utfLength);
+
+        for (int i = 0; i < charLength; i++) {
+            final int c = value.charAt(i);
+            if (c >= 0x0001 && c <= 0x007F) {
+                buffer.writeByte(c);
+            } else if (c > 0x07FF) {
+                buffer.writeByte(0xE0 | ((c >> 12) & 0x0F));
+                buffer.writeByte(0x80 | ((c >> 6) & 0x3F));
+                buffer.writeByte(0x80 | (c & 0x3F));
+            } else {
+                buffer.writeByte(0xC0 | ((c >> 6) & 0x1F));
+                buffer.writeByte(0x80 | (c & 0x3F));
+            }
+        }
+    }
+}
+"""
+write("leaf-server/src/main/java/org/dreeam/leaf/performance/WarextNbtDataOutput.java", nbt_data_output)
+print("[ok] reusable NBT ByteBuf DataOutput adapter")
+
+replace_once(
+    "leaf-server/src/minecraft/java/net/minecraft/network/FriendlyByteBuf.java",
+    "            NbtIo.writeAnyTag(tag, new ByteBufOutputStream(output));",
+    "            org.dreeam.leaf.performance.WarextNbtDataOutput.writeAnyTag(tag, output);",
+    "NBT ByteBufOutputStream allocation removal",
+)
+
+print("Stage 20: NBT network serialization allocation reduction applied.")
+
+
+# 34) Product-facing Warext Server Engine branding.
 # Keep upstream package/class names where compatibility requires them, but do not expose the
 # upstream project name as the product identity in runtime brand, commands, config headers,
 # replay metadata, manifests, or user-facing diagnostics.
