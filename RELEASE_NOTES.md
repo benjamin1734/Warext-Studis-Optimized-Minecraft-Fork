@@ -20,6 +20,7 @@ Experimental high-performance server engine build for the 26.3 line.
 - Product-facing branding standardized as Warext Server Engine.
 - VoxelBench baseline `vxb_ho3bolny` tuning:
   - Balanced profile now enables Dynamic Activation of Brain while retaining the upstream compatibility blacklist.
+  - Balanced profile also enables the optimized KD-tree entity-activation implementation without changing configured activation ranges.
   - Balanced 4-vCPU hosts use one async pathfinding worker to preserve main-thread/GC/Netty headroom.
   - New Paper world configs default to Alternate Current redstone.
   - Chunk packet block-entity metadata is pre-sized to reduce transient allocation/growth churn.
