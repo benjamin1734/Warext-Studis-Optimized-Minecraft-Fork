@@ -1,13 +1,12 @@
-# Warext Studis Optimized Minecraft Fork
+# Warext Server Engine
 
-Performance-focused Minecraft server fork build project based on the official open-source Leaf project.
+High-performance Minecraft server engine focused on low MSPT, low p95/p99 tick latency, efficient CPU scheduling, reduced allocation/GC pressure and low memory overhead.
 
 ## Current target
-- Upstream: `Winds-Studio/Leaf`
-- Base branch: `dev/26.3`
+- Minecraft line: 26.3
 - Java: 25
-- Release line: `26.3-exp.1`
-- Goal: minimize MSPT, p95/p99 tick latency, CPU time per tick, allocation/GC pressure and RAM use while keeping broad Paper/Leaf compatibility.
+- Release line: `26.3-exp.2`
+- Goal: minimize MSPT, p95/p99 tick latency, CPU time per tick, allocation/GC pressure and RAM use while preserving broad Paper ecosystem compatibility.
 
 ## Performance profiles
 
@@ -15,7 +14,7 @@ Performance-focused Minecraft server fork build project based on the official op
 Recommended general-purpose profile.
 
 ```bash
-java -Dwarext.profile=balanced -Xms4G -Xmx4G -jar Warext-Studis-Optimized-Leaf-26.3.jar nogui
+java -Dwarext.profile=balanced -Xms4G -Xmx4G -jar Warext-Server-Engine-26.3.jar nogui
 ```
 
 Balanced enables optimized async pathfinding automatically on suitable multi-core CPUs, keeps CPU headroom for the main tick thread/GC/networking and leaves the experimental async entity tracker disabled by default.
@@ -24,7 +23,7 @@ Balanced enables optimized async pathfinding automatically on suitable multi-cor
 For high-entity servers where maximum tick throughput matters more than conservative compatibility.
 
 ```bash
-java -Dwarext.profile=extreme -Xms4G -Xmx4G -jar Warext-Studis-Optimized-Leaf-26.3.jar nogui
+java -Dwarext.profile=extreme -Xms4G -Xmx4G -jar Warext-Server-Engine-26.3.jar nogui
 ```
 
 Extreme enables the optimized multi-threaded entity tracker, experimental entity-activation/random-tick/sleeping-block-entity/DAB optimizers, and gives a larger share of the shared async CPU budget to pathfinding/tracking.
@@ -32,7 +31,7 @@ Extreme enables the optimized multi-threaded entity tracker, experimental entity
 ### Compatibility
 
 ```bash
-java -Dwarext.profile=compatibility -Xms4G -Xmx4G -jar Warext-Studis-Optimized-Leaf-26.3.jar nogui
+java -Dwarext.profile=compatibility -Xms4G -Xmx4G -jar Warext-Server-Engine-26.3.jar nogui
 ```
 
 Use this when plugin compatibility matters more than experimental async performance.
@@ -62,22 +61,26 @@ The automatic scheduler reserves CPU headroom instead of letting every subsystem
 - ChunkCache p99 rehash-spike avoidance.
 - Collision buffer reuse.
 - Random-tick/precipitation lookup reuse.
+- Async path lifecycle cleanup and bounded path queues.
+- Entity encode-id caching.
+- Light packet ThreadLocal retention cleanup.
 - Runtime Java 25 startup/shutdown smoke tests for both balanced and extreme profiles.
-- Reproducible builds pinned to a tested Leaf commit.
+- Reproducible builds pinned to a tested upstream commit.
 
 ## Validation
 
 Every release build must:
-1. Apply the current Leaf/Paper patch stack.
-2. Apply the Warext optimization layer.
-3. Build the Paperclip JAR.
-4. Start a real server with Java 25.
-5. Reach the server `Done` state.
-6. Shut down cleanly.
-7. Pass both `balanced` and `extreme` profile smoke tests before publication.
+1. Fetch the pinned upstream source revision.
+2. Apply the upstream patch stack.
+3. Apply the Warext performance layer.
+4. Build the server JAR.
+5. Start a real server with Java 25.
+6. Reach the server `Done` state.
+7. Shut down cleanly.
+8. Pass both `balanced` and `extreme` profile smoke tests before publication.
 
 Compilation and smoke tests prove build/runtime integrity; they do **not** prove a universal performance win on every workload. Real performance comparison should use p50/p95/p99 MSPT, CPU time/tick, allocation rate, GC pauses and heap use under the same workload.
 
-## Licensing
+## Licensing and attribution
 
-This project is an independent derivative/build project and is not affiliated with the Leaf project. It inherits applicable licenses from Leaf, Paper and individual upstream patches. See `LICENSE.md`.
+Warext Server Engine uses and modifies open-source upstream components. Required upstream attribution and license details are kept in `LICENSE.md`.
