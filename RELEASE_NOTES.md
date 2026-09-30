@@ -23,6 +23,7 @@ Experimental high-performance server engine build for the 26.3 line.
   - Balanced 4-vCPU hosts use one async pathfinding worker to preserve main-thread/GC/Netty headroom.
   - New Paper world configs default to Alternate Current redstone.
   - Chunk packet block-entity metadata is pre-sized to reduce transient allocation/growth churn.
+  - NBT writes to packet buffers reuse a thread-local DataOutput adapter instead of allocating a ByteBufOutputStream wrapper per object.
 
 ## Profiles
 - `compatibility`: conservative async defaults.
