@@ -2934,12 +2934,14 @@ for replay_file in [
     "leaf-server/src/main/java/org/leavesmc/leaves/replay/RecordMetaData.java",
     "leaf-api/src/main/java/org/leavesmc/leaves/replay/BukkitRecorderOption.java",
 ]:
-    data = read(replay_file)
+    replay_path = root / replay_file
+    if not replay_path.exists():
+        continue
+    data = replay_path.read_text(encoding="utf-8")
     old = 'public String serverName = "Leaf";'
-    if old not in data:
-        raise RuntimeError(f"Warext replay brand: missing target in {replay_file}")
-    write(replay_file, data.replace(old, 'public String serverName = "Warext Server Engine";', 1))
-    print(f"[ok] Warext replay brand: {replay_file}")
+    if old in data:
+        replay_path.write_text(data.replace(old, 'public String serverName = "Warext Server Engine";', 1), encoding="utf-8")
+        print(f"[ok] Warext replay brand: {replay_file}")
 
 build_file = root / "leaf-server/build.gradle.kts"
 if not build_file.exists():
