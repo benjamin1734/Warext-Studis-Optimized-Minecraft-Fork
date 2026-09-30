@@ -17,7 +17,7 @@ Recommended general-purpose profile.
 java -Dwarext.profile=balanced -Xms4G -Xmx4G -jar Warext-Server-Engine-26.3.jar nogui
 ```
 
-Balanced enables optimized async pathfinding automatically on suitable multi-core CPUs, enables Dynamic Activation of Brain with its compatibility blacklist, keeps extra CPU headroom on 4-vCPU hosts for the main tick thread/GC/networking, and leaves the experimental async entity tracker disabled by default.
+Balanced enables optimized async pathfinding automatically on suitable multi-core CPUs, enables Dynamic Activation of Brain with its compatibility blacklist and the optimized KD-tree entity-activation implementation, keeps extra CPU headroom on 4-vCPU hosts for the main tick thread/GC/networking, and leaves the experimental async entity tracker disabled by default.
 
 ### Extreme
 For high-entity servers where maximum tick throughput matters more than conservative compatibility.
