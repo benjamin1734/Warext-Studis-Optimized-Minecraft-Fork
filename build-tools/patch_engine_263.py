@@ -2637,6 +2637,10 @@ public final class WarextPerformanceProfile {
         return MODE == Mode.EXTREME;
     }
 
+    public static boolean dynamicBrainDefault() {
+        return MODE != Mode.COMPATIBILITY;
+    }
+
     public static boolean asyncPathfindingDefault() {
         return MODE != Mode.COMPATIBILITY && Runtime.getRuntime().availableProcessors() >= 4;
     }
@@ -2715,7 +2719,10 @@ replace_once(
     budget_file,
     """        final int budget = workerBudget();
         return Math.max(1, Math.min(8, (budget * 35 + 99) / 100));""",
-    """        final int budget = workerBudget();
+    """        if (!WarextPerformanceProfile.isExtreme() && PROCESSORS <= 4) {
+            return 1;
+        }
+        final int budget = workerBudget();
         final int percent = WarextPerformanceProfile.isExtreme() ? 45 : 35;
         return Math.max(1, Math.min(8, (budget * percent + 99) / 100));""",
     "profile-aware pathfinding CPU share",
@@ -2742,8 +2749,8 @@ replace_once(
 replace_once(
     "leaf-server/src/main/java/org/dreeam/leaf/config/modules/opt/DynamicActivationofBrain.java",
     "    public static boolean enabled = false;",
-    "    public static boolean enabled = org.dreeam.leaf.performance.WarextPerformanceProfile.isExtreme();",
-    "extreme dynamic brain activation default",
+    "    public static boolean enabled = org.dreeam.leaf.performance.WarextPerformanceProfile.dynamicBrainDefault();",
+    "balanced/extreme dynamic brain activation default",
 )
 
 replace_once(
@@ -2763,8 +2770,48 @@ replace_once(
 print("Finalization: Warext balanced/extreme performance profiles applied.")
 
 
+# 32) VoxelBench baseline tuning (vxb_ho3bolny).
+# The baseline exposed three software-side tail-latency issues: redstone, entity AI on a
+# 4-vCPU host, and repeated growth allocations while constructing chunk packets. Keep these
+# changes workload-independent and avoid benchmark-only mob-count / activation-range nerfs.
 
-# 32) Product-facing Warext Server Engine branding.
+# Prefer Alternate Current for new worlds/configurations. Existing explicit config values remain
+# authoritative, so upgrading a server does not silently rewrite an administrator's choice.
+world_config_candidates = [
+    "paper-server/src/main/java/io/papermc/paper/configuration/WorldConfiguration.java",
+    "leaf-server/src/main/java/io/papermc/paper/configuration/WorldConfiguration.java",
+]
+world_config = next((candidate for candidate in world_config_candidates if (root / candidate).exists()), None)
+if world_config is None:
+    raise RuntimeError("Generated Paper WorldConfiguration.java was not found")
+replace_once(
+    world_config,
+    "        public RedstoneImplementation redstoneImplementation = RedstoneImplementation.VANILLA;",
+    "        public RedstoneImplementation redstoneImplementation = RedstoneImplementation.ALTERNATE_CURRENT;",
+    "Warext default Alternate Current redstone implementation",
+)
+
+# Pre-size chunk block-entity metadata instead of repeatedly growing the backing Object[] during
+# chunk/NBT packet construction. This is deliberately bounded to the normal packet-side limit.
+chunk_packet = "leaf-server/src/minecraft/java/net/minecraft/network/protocol/game/ClientboundLevelChunkPacketData.java"
+replace_once(
+    chunk_packet,
+    """        this.blockEntitiesData = Lists.newArrayList();
+        int totalTileEntities = 0; // Paper - Handle oversized block entities in chunks
+
+        for (final BlockEntity blockEntity : levelChunk.getBlockEntities().values()) { // Leaf - Optimize chunk packet construction""",
+    """        final java.util.Map<BlockPos, BlockEntity> warextBlockEntities = levelChunk.getBlockEntities();
+        this.blockEntitiesData = new java.util.ArrayList<>(Math.min(warextBlockEntities.size(), BLOCK_ENTITY_LIMIT));
+        int totalTileEntities = 0; // Paper - Handle oversized block entities in chunks
+
+        for (final BlockEntity blockEntity : warextBlockEntities.values()) { // Leaf - Optimize chunk packet construction // Warext - reuse lookup + pre-size metadata""",
+    "chunk packet block-entity metadata pre-sizing",
+)
+
+print("Stage 19: VoxelBench baseline tail-latency tuning applied.")
+
+
+# 33) Product-facing Warext Server Engine branding.
 # Keep upstream package/class names where compatibility requires them, but do not expose the
 # upstream project name as the product identity in runtime brand, commands, config headers,
 # replay metadata, manifests, or user-facing diagnostics.
