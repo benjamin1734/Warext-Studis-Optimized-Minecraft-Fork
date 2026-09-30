@@ -137,6 +137,24 @@ jobs:
               }
             fi
 
+            test -f config/warext-global.yml || {
+              echo "Warext configuration file was not generated"
+              find config -maxdepth 1 -type f -print || true
+              exit 1
+            }
+            if [ -e config/leaf-global.yml ]; then
+              echo "Legacy upstream-branded configuration filename was generated unexpectedly"
+              exit 1
+            fi
+
+            echo "warext version" >&3
+            sleep 3
+            grep -q "Warext Server Engine experimental build" server.log || {
+              echo "Warext runtime command/brand verification failed"
+              cat server.log
+              exit 1
+            }
+
             echo "stop" >&3
             for i in $(seq 1 30); do
               if ! kill -0 "$PID" 2>/dev/null; then
