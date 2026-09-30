@@ -65,6 +65,7 @@ The automatic scheduler reserves CPU headroom instead of letting every subsystem
 - Entity encode-id caching.
 - Light packet ThreadLocal retention cleanup.
 - VoxelBench-driven 4-vCPU scheduler tuning, balanced DAB defaults, Alternate Current defaults for new configs, and chunk-packet metadata allocation reductions.
+- Reusable packet-NBT DataOutput adapter to reduce per-object serialization allocation and GC pressure.
 - Runtime Java 25 startup/shutdown smoke tests for both balanced and extreme profiles.
 - Reproducible builds pinned to a tested upstream commit.
 
