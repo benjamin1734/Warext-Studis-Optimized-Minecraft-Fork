@@ -2,7 +2,7 @@ name: Build Warext Server Engine 26.3
 
 on:
   push:
-    branches: [ "main", "branding-warext-server-engine" ]
+    branches: [ "main" ]
     paths:
       - "build-tools/**"
       - ".github/workflows/build-fork.yml"
