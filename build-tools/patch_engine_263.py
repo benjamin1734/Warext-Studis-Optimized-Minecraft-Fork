@@ -2641,6 +2641,10 @@ public final class WarextPerformanceProfile {
         return MODE != Mode.COMPATIBILITY;
     }
 
+    public static boolean entityActivationOptimizerDefault() {
+        return MODE != Mode.COMPATIBILITY;
+    }
+
     public static boolean asyncPathfindingDefault() {
         return MODE != Mode.COMPATIBILITY && Runtime.getRuntime().availableProcessors() >= 4;
     }
@@ -2756,8 +2760,8 @@ replace_once(
 replace_once(
     "leaf-server/src/main/java/org/dreeam/leaf/config/modules/opt/OptimizeEntityActivation.java",
     "    public static boolean enabled = false;",
-    "    public static boolean enabled = org.dreeam.leaf.performance.WarextPerformanceProfile.isExtreme();",
-    "extreme entity activation optimizer default",
+    "    public static boolean enabled = org.dreeam.leaf.performance.WarextPerformanceProfile.entityActivationOptimizerDefault();",
+    "balanced/extreme entity activation optimizer default",
 )
 
 replace_once(
