@@ -1,4 +1,4 @@
-# Warext Server Engine 26.3 exp.2
+# Warext Server Engine 26.3 exp.3
 
 Experimental high-performance server engine build for the 26.3 line.
 
@@ -18,6 +18,11 @@ Experimental high-performance server engine build for the 26.3 line.
 - Light packet ThreadLocal buffer reference cleanup to reduce retained heap.
 - Real Java 25 startup/shutdown smoke tests in CI for both balanced and extreme profiles.
 - Product-facing branding standardized as Warext Server Engine.
+- VoxelBench baseline `vxb_ho3bolny` tuning:
+  - Balanced profile now enables Dynamic Activation of Brain while retaining the upstream compatibility blacklist.
+  - Balanced 4-vCPU hosts use one async pathfinding worker to preserve main-thread/GC/Netty headroom.
+  - New Paper world configs default to Alternate Current redstone.
+  - Chunk packet block-entity metadata is pre-sized to reduce transient allocation/growth churn.
 
 ## Profiles
 - `compatibility`: conservative async defaults.
