@@ -1,6 +1,6 @@
-# Warext Optimized Leaf 26.3 exp.1
+# Warext Server Engine 26.3 exp.2
 
-Experimental performance-focused build based on Leaf dev/26.3.
+Experimental high-performance server engine build for the 26.3 line.
 
 ## Main changes
 - Shared adaptive CPU budget for pathfinding, entity tracking and async save/compression workers.
@@ -17,6 +17,7 @@ Experimental performance-focused build based on Leaf dev/26.3.
 - Entity encode-id caching and reusable tracker Future/join wrapper arrays.
 - Light packet ThreadLocal buffer reference cleanup to reduce retained heap.
 - Real Java 25 startup/shutdown smoke tests in CI for both balanced and extreme profiles.
+- Product-facing branding standardized as Warext Server Engine.
 
 ## Profiles
 - `compatibility`: conservative async defaults.
@@ -25,4 +26,4 @@ Experimental performance-focused build based on Leaf dev/26.3.
 
 Select with `-Dwarext.profile=balanced` or `-Dwarext.profile=extreme`.
 
-Leaf 26.3 itself is still a development branch, so this release is marked prerelease.
+This release remains a prerelease because the 26.3 upstream base is still under active development.
