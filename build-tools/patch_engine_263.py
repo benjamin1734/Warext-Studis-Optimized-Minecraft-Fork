@@ -1840,6 +1840,24 @@ replace_once(
 
 print("Stage 9: shared adaptive multi-core CPU budget applied.")
 
+# VoxelBench AI tail-latency: on a 4-vCPU balanced host keep one steady pathfinding worker
+# but allow a second low-priority worker when the bounded queue saturates. This avoids immediately
+# pushing rejected CPU-heavy path work back onto the tick thread through CALLER_RUNS.
+replace_once(
+    "leaf-server/src/main/java/org/dreeam/leaf/async/path/AsyncPathProcessor.java",
+    """    private static int getCorePoolSize() {
+        return getMaxPoolSize();
+    }""",
+    """    private static int getCorePoolSize() {
+        if (!org.dreeam.leaf.performance.WarextPerformanceProfile.isExtreme()
+            && org.dreeam.leaf.performance.WarextCpuBudget.processors() <= 4) {
+            return Math.min(1, getMaxPoolSize());
+        }
+        return getMaxPoolSize();
+    }""",
+    "4-vCPU balanced steady/burst pathfinding split",
+)
+
 
 # 22) Async save/compression worker count: draw only from spare shared CPU budget.
 #     Keep resource use at one worker on smaller hosts; allow up to two low-priority workers
@@ -2381,7 +2399,8 @@ print("Stage 15: immutable entity encode-id caching applied.")
 replace_once(
     "leaf-server/src/main/java/org/dreeam/leaf/config/modules/async/AsyncPathfinding.java",
     """        if (asyncPathfindingQueueSize <= 0) {
-            asyncPathfindingQueueSize = asyncPathfindingMaxThreads * 256;
+            final int queuePerThread = availableProcessors <= 4 ? 128 : 256;
+            asyncPathfindingQueueSize = asyncPathfindingMaxThreads * queuePerThread;
         }""",
     """        if (asyncPathfindingQueueSize <= 0) {
             asyncPathfindingQueueSize = Math.max(
@@ -2724,7 +2743,9 @@ replace_once(
     """        final int budget = workerBudget();
         return Math.max(1, Math.min(8, (budget * 35 + 99) / 100));""",
     """        if (!WarextPerformanceProfile.isExtreme() && PROCESSORS <= 4) {
-            return 1;
+            // AsyncPathProcessor keeps only one core worker alive in this case; the second
+            // thread is burst capacity used only after the bounded queue fills.
+            return Math.min(2, PROCESSORS);
         }
         final int budget = workerBudget();
         final int percent = WarextPerformanceProfile.isExtreme() ? 45 : 35;

@@ -31,6 +31,7 @@ Experimental high-performance server engine build for the 26.3 line.
   - NBT modified-UTF writes use a Netty bulk ASCII fast path for common keys/strings.
   - Non-ASCII modified-UTF writes use a bounded thread-local byte buffer to reduce per-byte calls and transient allocation.
   - Existing Minecraft sensor start randomization is intentionally preserved; no duplicate staggering or reduced AI tick frequency is introduced.
+  - On 4-vCPU balanced hosts, async pathfinding keeps one steady worker and allows a second burst worker after queue saturation; the default queue remains bounded so backlog cannot grow without limit.
 
 ## Profiles
 - `compatibility`: conservative async defaults.
