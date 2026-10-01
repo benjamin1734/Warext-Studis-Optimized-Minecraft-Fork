@@ -2833,6 +2833,9 @@ public final class WarextNbtDataOutput implements DataOutput {
 
     private static final ThreadLocal<WarextNbtDataOutput> LOCAL =
         ThreadLocal.withInitial(WarextNbtDataOutput::new);
+    private static final int MAX_RETAINED_UTF_BUFFER = 8192;
+    private static final ThreadLocal<byte[]> UTF_BUFFER =
+        ThreadLocal.withInitial(() -> new byte[256]);
 
     private ByteBuf output;
 
@@ -2855,6 +2858,24 @@ public final class WarextNbtDataOutput implements DataOutput {
             throw new IllegalStateException("Warext NBT output used outside an active write");
         }
         return current;
+    }
+
+    private static byte[] acquireUtfBuffer(final int length) {
+        final byte[] current = UTF_BUFFER.get();
+        if (current.length >= length) {
+            return current;
+        }
+        if (length > MAX_RETAINED_UTF_BUFFER) {
+            return new byte[length];
+        }
+
+        int newLength = current.length;
+        while (newLength < length) {
+            newLength = Math.min(MAX_RETAINED_UTF_BUFFER, newLength << 1);
+        }
+        final byte[] grown = new byte[newLength];
+        UTF_BUFFER.set(grown);
+        return grown;
     }
 
     @Override
@@ -2932,15 +2953,19 @@ public final class WarextNbtDataOutput implements DataOutput {
     public void writeUTF(final String value) throws IOException {
         final int charLength = value.length();
         int utfLength = 0;
+        boolean ascii = true;
 
         for (int i = 0; i < charLength; i++) {
             final int c = value.charAt(i);
             if (c >= 0x0001 && c <= 0x007F) {
                 utfLength++;
-            } else if (c > 0x07FF) {
-                utfLength += 3;
             } else {
-                utfLength += 2;
+                ascii = false;
+                if (c > 0x07FF) {
+                    utfLength += 3;
+                } else {
+                    utfLength += 2;
+                }
             }
         }
 
@@ -2951,19 +2976,29 @@ public final class WarextNbtDataOutput implements DataOutput {
         final ByteBuf buffer = output();
         buffer.writeShort(utfLength);
 
+        // NBT field names and most protocol strings are overwhelmingly 7-bit ASCII.
+        // Netty's bulk ASCII writer avoids one virtual writeByte call per character.
+        if (ascii) {
+            io.netty.buffer.ByteBufUtil.writeAscii(buffer, value);
+            return;
+        }
+
+        final byte[] encoded = acquireUtfBuffer(utfLength);
+        int out = 0;
         for (int i = 0; i < charLength; i++) {
             final int c = value.charAt(i);
             if (c >= 0x0001 && c <= 0x007F) {
-                buffer.writeByte(c);
+                encoded[out++] = (byte) c;
             } else if (c > 0x07FF) {
-                buffer.writeByte(0xE0 | ((c >> 12) & 0x0F));
-                buffer.writeByte(0x80 | ((c >> 6) & 0x3F));
-                buffer.writeByte(0x80 | (c & 0x3F));
+                encoded[out++] = (byte) (0xE0 | ((c >> 12) & 0x0F));
+                encoded[out++] = (byte) (0x80 | ((c >> 6) & 0x3F));
+                encoded[out++] = (byte) (0x80 | (c & 0x3F));
             } else {
-                buffer.writeByte(0xC0 | ((c >> 6) & 0x1F));
-                buffer.writeByte(0x80 | (c & 0x3F));
+                encoded[out++] = (byte) (0xC0 | ((c >> 6) & 0x1F));
+                encoded[out++] = (byte) (0x80 | (c & 0x3F));
             }
         }
+        buffer.writeBytes(encoded, 0, utfLength);
     }
 }
 """
@@ -2980,7 +3015,102 @@ replace_once(
 print("Stage 20: NBT network serialization allocation reduction applied.")
 
 
-# 34) Product-facing Warext Server Engine branding.
+# 34) VoxelBench vxb_tbaakena AI allocation pass.
+# Leaf already randomizes Sensor start phases through Brain#randomlyDelayStart, so do not add
+# duplicate staggering. Instead retain the large temporary entity/player arrays across scans.
+# Memory-facing lists use ping-pong buffers: the buffer still referenced by Brain memory is never
+# cleared while building the next scan result.
+
+nearest_living_sensor = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/sensing/NearestLivingEntitySensor.java"
+replace_once(
+    nearest_living_sensor,
+    "public class NearestLivingEntitySensor<T extends LivingEntity> extends Sensor<T> {",
+    """public class NearestLivingEntitySensor<T extends LivingEntity> extends Sensor<T> {
+    private final it.unimi.dsi.fastutil.objects.ObjectArrayList<LivingEntity> warextLivingA =
+        new it.unimi.dsi.fastutil.objects.ObjectArrayList<>(16);
+    private final it.unimi.dsi.fastutil.objects.ObjectArrayList<LivingEntity> warextLivingB =
+        new it.unimi.dsi.fastutil.objects.ObjectArrayList<>(16);
+    private boolean warextLivingUseA;""",
+    "nearest-living sensor ping-pong buffers",
+)
+replace_once(
+    nearest_living_sensor,
+    "        it.unimi.dsi.fastutil.objects.ObjectArrayList<LivingEntity> livingEntities = new it.unimi.dsi.fastutil.objects.ObjectArrayList<>();",
+    """        final it.unimi.dsi.fastutil.objects.ObjectArrayList<LivingEntity> livingEntities =
+            this.warextLivingUseA ? this.warextLivingA : this.warextLivingB;
+        this.warextLivingUseA = !this.warextLivingUseA;
+        livingEntities.clear();""",
+    "nearest-living sensor buffer reuse",
+)
+
+player_sensor = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/sensing/PlayerSensor.java"
+replace_once(
+    player_sensor,
+    "public class PlayerSensor extends Sensor<LivingEntity> {",
+    """public class PlayerSensor extends Sensor<LivingEntity> {
+    private final it.unimi.dsi.fastutil.objects.ObjectArrayList<Player> warextPlayersA =
+        new it.unimi.dsi.fastutil.objects.ObjectArrayList<>(8);
+    private final it.unimi.dsi.fastutil.objects.ObjectArrayList<Player> warextPlayersB =
+        new it.unimi.dsi.fastutil.objects.ObjectArrayList<>(8);
+    private final it.unimi.dsi.fastutil.objects.ObjectArrayList<Player> warextVisibleA =
+        new it.unimi.dsi.fastutil.objects.ObjectArrayList<>(8);
+    private final it.unimi.dsi.fastutil.objects.ObjectArrayList<Player> warextVisibleB =
+        new it.unimi.dsi.fastutil.objects.ObjectArrayList<>(8);
+    private final it.unimi.dsi.fastutil.objects.ObjectArrayList<Player> warextAttackableA =
+        new it.unimi.dsi.fastutil.objects.ObjectArrayList<>(8);
+    private final it.unimi.dsi.fastutil.objects.ObjectArrayList<Player> warextAttackableB =
+        new it.unimi.dsi.fastutil.objects.ObjectArrayList<>(8);
+    private boolean warextPlayerUseA;""",
+    "player sensor ping-pong buffers",
+)
+replace_once(
+    player_sensor,
+    "        it.unimi.dsi.fastutil.objects.ObjectArrayList<Player> players = new it.unimi.dsi.fastutil.objects.ObjectArrayList<>();",
+    """        final boolean warextUseA = this.warextPlayerUseA;
+        this.warextPlayerUseA = !warextUseA;
+        final it.unimi.dsi.fastutil.objects.ObjectArrayList<Player> players =
+            warextUseA ? this.warextPlayersA : this.warextPlayersB;
+        players.clear();""",
+    "player sensor nearest-player buffer reuse",
+)
+replace_once(
+    player_sensor,
+    "        List<Player> visiblePlayers = new java.util.ArrayList<>(players.size());",
+    """        final it.unimi.dsi.fastutil.objects.ObjectArrayList<Player> visiblePlayers =
+            warextUseA ? this.warextVisibleA : this.warextVisibleB;
+        visiblePlayers.clear();""",
+    "player sensor visible-player buffer reuse",
+)
+replace_once(
+    player_sensor,
+    "        List<Player> visibleAttackablePlayers = new java.util.ArrayList<>(visiblePlayers.size());",
+    """        final it.unimi.dsi.fastutil.objects.ObjectArrayList<Player> visibleAttackablePlayers =
+            warextUseA ? this.warextAttackableA : this.warextAttackableB;
+        visibleAttackablePlayers.clear();""",
+    "player sensor attackable-player buffer reuse",
+)
+
+nearest_item_sensor = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/sensing/NearestItemSensor.java"
+replace_once(
+    nearest_item_sensor,
+    "public class NearestItemSensor extends Sensor<Mob> {",
+    """public class NearestItemSensor extends Sensor<Mob> {
+    private final it.unimi.dsi.fastutil.objects.ObjectArrayList<ItemEntity> warextItems =
+        new it.unimi.dsi.fastutil.objects.ObjectArrayList<>(16);""",
+    "nearest-item sensor reusable scratch field",
+)
+replace_once(
+    nearest_item_sensor,
+    "        it.unimi.dsi.fastutil.objects.ObjectArrayList<ItemEntity> items = new it.unimi.dsi.fastutil.objects.ObjectArrayList<>();",
+    """        final it.unimi.dsi.fastutil.objects.ObjectArrayList<ItemEntity> items = this.warextItems;
+        items.clear();""",
+    "nearest-item sensor scratch reuse",
+)
+
+print("Stage 21: AI sensor hot-path allocation reuse applied.")
+
+
+# 35) Product-facing Warext Server Engine branding.
 # Keep upstream package/class names where compatibility requires them, but do not expose the
 # upstream project name as the product identity in runtime brand, commands, config headers,
 # replay metadata, manifests, or user-facing diagnostics.

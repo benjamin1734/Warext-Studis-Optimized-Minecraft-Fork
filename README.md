@@ -5,7 +5,7 @@ High-performance Minecraft server engine focused on low MSPT, low p95/p99 tick l
 ## Current target
 - Minecraft line: 26.3
 - Java: 25
-- Release line: `26.3-exp.3`
+- Release line: `26.3-exp.4`
 - Goal: minimize MSPT, p95/p99 tick latency, CPU time per tick, allocation/GC pressure and RAM use while preserving broad Paper ecosystem compatibility.
 
 ## Performance profiles
@@ -66,6 +66,7 @@ The automatic scheduler reserves CPU headroom instead of letting every subsystem
 - Light packet ThreadLocal retention cleanup.
 - VoxelBench-driven 4-vCPU scheduler tuning, balanced DAB defaults, Alternate Current defaults for new configs, and chunk-packet metadata allocation reductions.
 - Reusable packet-NBT DataOutput adapter to reduce per-object serialization allocation and GC pressure.
+- VoxelBench vxb_tbaakena pass: ping-pong AI sensor buffers for nearest-entity/player memories, reusable nearest-item scratch storage, and bulk modified-UTF packet encoding with bounded thread-local scratch memory.
 - Runtime Java 25 startup/shutdown smoke tests for both balanced and extreme profiles.
 - Reproducible builds pinned to a tested upstream commit.
 
