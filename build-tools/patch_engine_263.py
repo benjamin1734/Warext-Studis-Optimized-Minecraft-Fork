@@ -2399,14 +2399,20 @@ print("Stage 15: immutable entity encode-id caching applied.")
 replace_once(
     "leaf-server/src/main/java/org/dreeam/leaf/config/modules/async/AsyncPathfinding.java",
     """        if (asyncPathfindingQueueSize <= 0) {
-            final int queuePerThread = availableProcessors <= 4 ? 128 : 256;
-            asyncPathfindingQueueSize = asyncPathfindingMaxThreads * queuePerThread;
+            asyncPathfindingQueueSize = asyncPathfindingMaxThreads * 256;
         }""",
     """        if (asyncPathfindingQueueSize <= 0) {
-            asyncPathfindingQueueSize = Math.max(
-                512,
-                Math.min(1024, asyncPathfindingMaxThreads * 128)
-            );
+            if (availableProcessors <= 4) {
+                asyncPathfindingQueueSize = Math.max(
+                    128,
+                    Math.min(256, asyncPathfindingMaxThreads * 128)
+                );
+            } else {
+                asyncPathfindingQueueSize = Math.max(
+                    512,
+                    Math.min(1024, asyncPathfindingMaxThreads * 128)
+                );
+            }
         }""",
     "bounded adaptive pathfinding queue",
 )
