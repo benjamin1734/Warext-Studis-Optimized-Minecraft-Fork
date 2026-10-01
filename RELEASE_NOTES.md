@@ -26,8 +26,8 @@ Experimental high-performance server engine build for the 26.3 line.
   - Chunk packet block-entity metadata is pre-sized to reduce transient allocation/growth churn.
   - NBT writes to packet buffers reuse a thread-local DataOutput adapter instead of allocating a ByteBufOutputStream wrapper per object.
 - VoxelBench follow-up `vxb_tbaakena` tuning:
-  - Nearest-living and player AI sensors use ping-pong buffers so Brain memory remains valid without allocating fresh lists every scan.
   - Nearest-item sensing reuses a private scratch list instead of allocating on each scan.
+  - Nearest-living/player result lists are deliberately not pooled because they are published into Brain memory; preserving their reference lifetime takes priority over a speculative allocation win.
   - NBT modified-UTF writes use a Netty bulk ASCII fast path for common keys/strings.
   - Non-ASCII modified-UTF writes use a bounded thread-local byte buffer to reduce per-byte calls and transient allocation.
   - Existing Minecraft sensor start randomization is intentionally preserved; no duplicate staggering or reduced AI tick frequency is introduced.

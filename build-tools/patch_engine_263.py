@@ -3042,74 +3042,9 @@ print("Stage 20: NBT network serialization allocation reduction applied.")
 # Memory-facing lists use ping-pong buffers: the buffer still referenced by Brain memory is never
 # cleared while building the next scan result.
 
-nearest_living_sensor = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/sensing/NearestLivingEntitySensor.java"
-replace_once(
-    nearest_living_sensor,
-    "public class NearestLivingEntitySensor<T extends LivingEntity> extends Sensor<T> {",
-    """public class NearestLivingEntitySensor<T extends LivingEntity> extends Sensor<T> {
-    private final it.unimi.dsi.fastutil.objects.ObjectArrayList<LivingEntity> warextLivingA =
-        new it.unimi.dsi.fastutil.objects.ObjectArrayList<>(16);
-    private final it.unimi.dsi.fastutil.objects.ObjectArrayList<LivingEntity> warextLivingB =
-        new it.unimi.dsi.fastutil.objects.ObjectArrayList<>(16);
-    private boolean warextLivingUseA;""",
-    "nearest-living sensor ping-pong buffers",
-)
-replace_once(
-    nearest_living_sensor,
-    "        it.unimi.dsi.fastutil.objects.ObjectArrayList<LivingEntity> livingEntities = new it.unimi.dsi.fastutil.objects.ObjectArrayList<>();",
-    """        final it.unimi.dsi.fastutil.objects.ObjectArrayList<LivingEntity> livingEntities =
-            this.warextLivingUseA ? this.warextLivingA : this.warextLivingB;
-        this.warextLivingUseA = !this.warextLivingUseA;
-        livingEntities.clear();""",
-    "nearest-living sensor buffer reuse",
-)
-
-player_sensor = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/sensing/PlayerSensor.java"
-replace_once(
-    player_sensor,
-    "public class PlayerSensor extends Sensor<LivingEntity> {",
-    """public class PlayerSensor extends Sensor<LivingEntity> {
-    private final it.unimi.dsi.fastutil.objects.ObjectArrayList<Player> warextPlayersA =
-        new it.unimi.dsi.fastutil.objects.ObjectArrayList<>(8);
-    private final it.unimi.dsi.fastutil.objects.ObjectArrayList<Player> warextPlayersB =
-        new it.unimi.dsi.fastutil.objects.ObjectArrayList<>(8);
-    private final it.unimi.dsi.fastutil.objects.ObjectArrayList<Player> warextVisibleA =
-        new it.unimi.dsi.fastutil.objects.ObjectArrayList<>(8);
-    private final it.unimi.dsi.fastutil.objects.ObjectArrayList<Player> warextVisibleB =
-        new it.unimi.dsi.fastutil.objects.ObjectArrayList<>(8);
-    private final it.unimi.dsi.fastutil.objects.ObjectArrayList<Player> warextAttackableA =
-        new it.unimi.dsi.fastutil.objects.ObjectArrayList<>(8);
-    private final it.unimi.dsi.fastutil.objects.ObjectArrayList<Player> warextAttackableB =
-        new it.unimi.dsi.fastutil.objects.ObjectArrayList<>(8);
-    private boolean warextPlayerUseA;""",
-    "player sensor ping-pong buffers",
-)
-replace_once(
-    player_sensor,
-    "        it.unimi.dsi.fastutil.objects.ObjectArrayList<Player> players = new it.unimi.dsi.fastutil.objects.ObjectArrayList<>();",
-    """        final boolean warextUseA = this.warextPlayerUseA;
-        this.warextPlayerUseA = !warextUseA;
-        final it.unimi.dsi.fastutil.objects.ObjectArrayList<Player> players =
-            warextUseA ? this.warextPlayersA : this.warextPlayersB;
-        players.clear();""",
-    "player sensor nearest-player buffer reuse",
-)
-replace_once(
-    player_sensor,
-    "        List<Player> visiblePlayers = new java.util.ArrayList<>(players.size());",
-    """        final it.unimi.dsi.fastutil.objects.ObjectArrayList<Player> visiblePlayers =
-            warextUseA ? this.warextVisibleA : this.warextVisibleB;
-        visiblePlayers.clear();""",
-    "player sensor visible-player buffer reuse",
-)
-replace_once(
-    player_sensor,
-    "        List<Player> visibleAttackablePlayers = new java.util.ArrayList<>(visiblePlayers.size());",
-    """        final it.unimi.dsi.fastutil.objects.ObjectArrayList<Player> visibleAttackablePlayers =
-            warextUseA ? this.warextAttackableA : this.warextAttackableB;
-        visibleAttackablePlayers.clear();""",
-    "player sensor attackable-player buffer reuse",
-)
+# Memory-facing NearestLivingEntitySensor/PlayerSensor result lists intentionally remain
+# freshly allocated. Those lists are published into Brain memory and may outlive the next scan;
+# reusing/clearing them could mutate a previously observed memory value and change AI semantics.
 
 nearest_item_sensor = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/sensing/NearestItemSensor.java"
 replace_once(

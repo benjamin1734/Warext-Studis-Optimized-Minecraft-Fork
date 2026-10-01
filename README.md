@@ -66,7 +66,7 @@ The automatic scheduler reserves CPU headroom instead of letting every subsystem
 - Light packet ThreadLocal retention cleanup.
 - VoxelBench-driven 4-vCPU scheduler tuning, balanced DAB defaults, Alternate Current defaults for new configs, and chunk-packet metadata allocation reductions.
 - Reusable packet-NBT DataOutput adapter to reduce per-object serialization allocation and GC pressure.
-- VoxelBench vxb_tbaakena pass: ping-pong AI sensor buffers for nearest-entity/player memories, reusable nearest-item scratch storage, and bulk modified-UTF packet encoding with bounded thread-local scratch memory.
+- VoxelBench vxb_tbaakena pass: reusable nearest-item sensor scratch storage, bulk modified-UTF packet encoding with bounded thread-local scratch memory, and 4-vCPU path-burst protection. Brain-memory result lists remain freshly allocated to preserve reference semantics.
 - 4-vCPU balanced pathfinding now uses one steady worker plus a second burst worker behind a bounded queue, reducing the chance of CALLER_RUNS path work falling back onto the main tick thread.
 - Runtime Java 25 startup/shutdown smoke tests for both balanced and extreme profiles.
 - Reproducible builds pinned to a tested upstream commit.
