@@ -2406,6 +2406,171 @@ print("[ok] async MoveToTargetSink stale-target guard")
 
 print("Stage 14: async path behavior lifecycle cleanup applied.")
 
+# 30) MoveToTargetSink async lifecycle correctness:
+#     - preserve partial paths instead of replacing them with a random fallback,
+#     - never clear the original target's unreachable timer because a fallback path succeeded,
+#     - restart promptly when WALK_TARGET changes while an async request is still pending,
+#     - keep Brain.PATH synchronized with the path actually installed in navigation.
+move_sink = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/behavior/MoveToTargetSink.java"
+data = read(move_sink)
+
+field_anchor = "    private boolean finishedProcessing; // Kaiiju - petal - async path processing - track when path is processed"
+if data.count(field_anchor) != 1:
+    raise RuntimeError(f"MoveToTargetSink finishedProcessing field: expected 1 match, got {data.count(field_anchor)}")
+data = data.replace(
+    field_anchor,
+    field_anchor + "\n    private boolean warext$fallbackPath;",
+    1,
+)
+
+start_anchor = """            this.finishedProcessing = false;
+            this.lastTargetPos = walkTarget.getTarget().currentBlockPosition();"""
+if data.count(start_anchor) != 1:
+    raise RuntimeError(f"MoveToTargetSink async start anchor: expected 1 match, got {data.count(start_anchor)}")
+data = data.replace(
+    start_anchor,
+    """            this.finishedProcessing = false;
+            this.warext$fallbackPath = false;
+            this.lastTargetPos = walkTarget.getTarget().currentBlockPosition();""",
+    1,
+)
+
+# Reset async request state when the behavior stops.
+stop_method = data.find("protected void stop(final ServerLevel level, final Mob body, final long timestamp)")
+if stop_method < 0:
+    raise RuntimeError("MoveToTargetSink stop method not found")
+start_method = data.find("protected void start(final ServerLevel level, final Mob body, final long timestamp)", stop_method)
+if start_method < 0:
+    raise RuntimeError("MoveToTargetSink start method not found after stop")
+stop_segment = data[stop_method:start_method]
+stop_path = "this.path = null;"
+if stop_segment.count(stop_path) != 1:
+    raise RuntimeError(f"MoveToTargetSink stop path reset: expected 1 match, got {stop_segment.count(stop_path)}")
+stop_segment = stop_segment.replace(
+    stop_path,
+    """this.path = null;
+        this.lastTargetPos = null;
+        this.finishedProcessing = false;
+        this.warext$fallbackPath = false;""",
+    1,
+)
+data = data[:stop_method] + stop_segment + data[start_method:]
+
+old_tick_async = """        if (org.dreeam.leaf.config.modules.async.AsyncPathfinding.enabled) {
+            if (this.path != null && !this.path.isProcessed()) return; // wait for processing
+
+            if (!this.finishedProcessing) {
+                this.finishedProcessing = true;
+
+                Brain<?> brain = body.getBrain();
+                boolean canReach = this.path != null && this.path.canReach();
+                if (canReach) {
+                    brain.eraseMemory(MemoryModuleType.CANT_REACH_WALK_TARGET_SINCE);
+                } else if (!brain.hasMemoryValue(MemoryModuleType.CANT_REACH_WALK_TARGET_SINCE)) {
+                    brain.setMemory(MemoryModuleType.CANT_REACH_WALK_TARGET_SINCE, timestamp);
+                }
+
+                if (!canReach) {
+                    Optional<WalkTarget> walkTarget = brain.getMemory(MemoryModuleType.WALK_TARGET);
+
+                    if (walkTarget.isEmpty()) return;
+
+                    BlockPos blockPos = walkTarget.get().getTarget().currentBlockPosition();
+                    Vec3 vec3 = DefaultRandomPos.getPosTowards((PathfinderMob) body, 10, 7, Vec3.atBottomCenterOf(blockPos), (float) Math.PI / 2F);
+                    if (vec3 != null) {
+                        // try recalculating the path using a random position
+                        this.path = body.getNavigation().createPath(vec3.x, vec3.y, vec3.z, 0);
+                        this.finishedProcessing = false;
+                        return;
+                    }
+                }
+
+                body.getBrain().setMemory(MemoryModuleType.PATH, this.path);
+                body.getNavigation().moveTo(this.path, this.speedModifier);
+            }
+
+            Path path = body.getNavigation().getPath();
+            Brain<?> brain = body.getBrain();
+
+            if (path != null && this.lastTargetPos != null && brain.hasMemoryValue(MemoryModuleType.WALK_TARGET)) {
+                WalkTarget walkTarget = brain.getMemory(MemoryModuleType.WALK_TARGET).get(); // we know isPresent = true
+                if (walkTarget.getTarget().currentBlockPosition().distSqr(this.lastTargetPos) > 4.0D) {
+                    this.start(level, body, timestamp);
+                }
+            }
+        } else {"""
+
+new_tick_async = """        if (org.dreeam.leaf.config.modules.async.AsyncPathfinding.enabled) {
+            Brain<?> brain = body.getBrain();
+            Optional<WalkTarget> activeTarget = brain.getMemory(MemoryModuleType.WALK_TARGET);
+            if (activeTarget.isEmpty()) {
+                body.getNavigation().stop();
+                brain.eraseMemory(MemoryModuleType.PATH);
+                this.path = null;
+                this.finishedProcessing = true;
+                return;
+            }
+
+            WalkTarget walkTarget = activeTarget.get();
+            if (this.lastTargetPos != null
+                && walkTarget.getTarget().currentBlockPosition().distSqr(this.lastTargetPos) > 4.0D) {
+                this.start(level, body, timestamp);
+                return;
+            }
+
+            if (this.path != null && !this.path.isProcessed()) return; // Warext - never block the tick thread
+
+            if (!this.finishedProcessing) {
+                if (!this.warext$fallbackPath) {
+                    boolean canReach = this.path != null && this.path.canReach();
+                    if (canReach) {
+                        brain.eraseMemory(MemoryModuleType.CANT_REACH_WALK_TARGET_SINCE);
+                    } else if (!brain.hasMemoryValue(MemoryModuleType.CANT_REACH_WALK_TARGET_SINCE)) {
+                        brain.setMemory(MemoryModuleType.CANT_REACH_WALK_TARGET_SINCE, timestamp);
+                    }
+
+                    // Preserve a valid partial path. Only synthesize a random fallback when
+                    // pathfinding produced no path at all.
+                    if (this.path == null) {
+                        this.warext$fallbackPath = true;
+                        BlockPos blockPos = walkTarget.getTarget().currentBlockPosition();
+                        Vec3 vec3 = DefaultRandomPos.getPosTowards(
+                            (PathfinderMob) body,
+                            10,
+                            7,
+                            Vec3.atBottomCenterOf(blockPos),
+                            (float) Math.PI / 2F
+                        );
+                        if (vec3 != null) {
+                            this.path = body.getNavigation().createPath(vec3.x, vec3.y, vec3.z, 0);
+                            if (this.path != null && !this.path.isProcessed()) return;
+                        }
+                    }
+                }
+
+                this.finishedProcessing = true;
+                body.getNavigation().moveTo(this.path, this.speedModifier);
+            }
+
+            // Navigation may trim, replace, or clear the requested path. Brain.PATH must
+            // always describe the route that navigation is actually following.
+            Path navigationPath = body.getNavigation().getPath();
+            this.path = navigationPath;
+            if (navigationPath == null) {
+                brain.eraseMemory(MemoryModuleType.PATH);
+            } else if (brain.getMemory(MemoryModuleType.PATH).orElse(null) != navigationPath) {
+                brain.setMemory(MemoryModuleType.PATH, navigationPath);
+            }
+        } else {"""
+
+if data.count(old_tick_async) != 1:
+    raise RuntimeError(f"MoveToTargetSink async tick body: expected 1 match, got {data.count(old_tick_async)}")
+data = data.replace(old_tick_async, new_tick_async, 1)
+
+write(move_sink, data)
+print("[ok] async MoveToTargetSink fallback/Brain.PATH synchronization")
+
+
 # 29) Amphibious async pathfinding: keep temporary WALKABLE/WATER_BORDER costs local
 #     to the evaluator. The vanilla evaluator mutates Mob pathfinding malus state during prepare()
 #     and restores it in done(); with pooled async evaluators that temporary global mutation can
