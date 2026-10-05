@@ -214,3 +214,16 @@ jobs:
             --title "Warext Server Engine $VERSION" \
             --notes-file RELEASE_NOTES.md \
             --prerelease
+
+
+      - name: Verify published JAR asset
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(tr -d '[:space:]' < build-tools/VERSION)
+          TAG="v$VERSION"
+          gh release view "$TAG" --json assets --jq '.assets[].name' | grep -Fxq "Warext-Server-Engine-26.3.jar" || {
+            echo "Release $TAG is missing Warext-Server-Engine-26.3.jar"
+            exit 1
+          }
