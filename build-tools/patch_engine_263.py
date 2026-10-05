@@ -2782,6 +2782,66 @@ print("[ok] wall-climber async path preparation")
 
 print("Stage 17: async navigation prepare/trim lifecycle applied.")
 
+# 32) Paper Pathfinder API is synchronous from the plugin caller's point of view.
+# Do not expose an unfinished AsyncPath to plugins: explicit API path queries finish the request,
+# and getCurrentPath also finalizes navigation preparation before wrapping the result.
+paper_pathfinder = "leaf-server/src/main/java/com/destroystokyo/paper/entity/PaperPathfinder.java"
+data = read(paper_pathfinder)
+
+current_old = """    public PathResult getCurrentPath() {
+        Path path = this.entity.getNavigation().getPath();
+        return path != null && !path.isDone() ? new PaperPathResult(path) : null;
+    }"""
+current_new = """    public PathResult getCurrentPath() {
+        net.minecraft.world.entity.ai.navigation.PathNavigation navigation = this.entity.getNavigation();
+        Path path = warext$processPath(navigation.getPath());
+        return path != null
+            && navigation.getPath() == path
+            && navigation.warext$preparePath()
+            && navigation.getPath() == path
+            ? new PaperPathResult(path)
+            : null;
+    }"""
+if data.count(current_old) != 1:
+    raise RuntimeError(f"PaperPathfinder getCurrentPath: expected 1 match, got {data.count(current_old)}")
+data = data.replace(current_old, current_new, 1)
+
+find_loc_old = """        Path path = this.entity.getNavigation().createPath(loc.getX(), loc.getY(), loc.getZ(), reachRange);
+        return path != null ? new PaperPathResult(path) : null;"""
+find_loc_new = """        Path path = warext$processPath(this.entity.getNavigation().createPath(loc.getX(), loc.getY(), loc.getZ(), reachRange));
+        return path != null ? new PaperPathResult(path) : null;"""
+if data.count(find_loc_old) != 1:
+    raise RuntimeError(f"PaperPathfinder findPath(Location): expected 1 match, got {data.count(find_loc_old)}")
+data = data.replace(find_loc_old, find_loc_new, 1)
+
+find_entity_old = """        Path path = this.entity.getNavigation().createPath(((CraftEntity) target).getHandle(), reachRange);
+        return path != null ? new PaperPathResult(path) : null;"""
+find_entity_new = """        Path path = warext$processPath(this.entity.getNavigation().createPath(((CraftEntity) target).getHandle(), reachRange));
+        return path != null ? new PaperPathResult(path) : null;"""
+if data.count(find_entity_old) != 1:
+    raise RuntimeError(f"PaperPathfinder findPath(Entity): expected 1 match, got {data.count(find_entity_old)}")
+data = data.replace(find_entity_old, find_entity_new, 1)
+
+helper_anchor = """    @Override
+    public boolean moveTo(@Nonnull PathResult path, double speed) {"""
+if data.count(helper_anchor) != 1:
+    raise RuntimeError(f"PaperPathfinder moveTo anchor: expected 1 match, got {data.count(helper_anchor)}")
+helper = """    @Nullable
+    private static Path warext$processPath(@Nullable Path path) {
+        if (path instanceof org.dreeam.leaf.async.path.AsyncPath asyncPath && !asyncPath.isProcessed()) {
+            asyncPath.process();
+        }
+        return path;
+    }
+
+"""
+data = data.replace(helper_anchor, helper + helper_anchor, 1)
+write(paper_pathfinder, data)
+print("[ok] Paper Pathfinder API async synchronization")
+
+print("Stage 18: synchronous Paper pathfinding API compatibility applied.")
+
+
 
 
 # 29) Amphibious async pathfinding: keep temporary WALKABLE/WATER_BORDER costs local
