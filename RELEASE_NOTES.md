@@ -1,31 +1,27 @@
-# Warext Server Engine 26.3 exp.8
+# Warext Server Engine 26.3 exp.9
 
 Experimental high-performance server engine build for the 26.3 line.
 
-## Async navigation lifecycle correctness
-- Preserve partial paths instead of replacing every unreachable result with a random fallback.
-- Keep the original target's `CANT_REACH_WALK_TARGET_SINCE` timer intact when a fallback route succeeds.
-- Restart an async navigation request promptly when `WALK_TARGET` moves while the old path is still processing.
-- Reset async fallback/request state when `MoveToTargetSink` stops.
-- Synchronize `Brain.PATH` with the path actually installed in navigation after move/recalculation instead of leaving stale path memory behind.
-- Clear `Brain.PATH` and navigation cleanly when the active walk target disappears.
-
-## Existing async path hardening retained
-- Nonblocking POI/HOME/nearest-bed result handling and stale POI revalidation.
-- Generator-scoped lock-free NodeEvaluator pools.
-- Amphibious WALKABLE/WATER_BORDER path-cost isolation.
-- Bounded async path queues and 4-vCPU steady/burst worker protection.
-- Shared CPU budgeting and tracker allocation reductions.
+## Async navigation prepare / trim lifecycle
+- Carry per-request reach-range metadata with the generated path instead of relying on callback timing.
+- Prepare each installed asynchronous path exactly once after the worker has completed it.
+- Run navigation `trimPath()` only against a fully processed path so sunlight avoidance and cauldron/path-node corrections are never evaluated against an unfinished route.
+- Keep repeated synchronous `moveTo` calls compatible with normal trimming semantics.
+- Reset prepared-path state whenever navigation recomputes, replaces, stops, or clears a path.
+- Finalize async metadata (target, reach range, stuck timeout) when the installed path becomes ready.
+- Apply the same readiness gate to flying navigation.
+- Prepare wall-climber paths before their early `isDone()` check.
+- Preserve exp.8 Brain.PATH/fallback synchronization and all prior async correctness/performance fixes.
 
 ## Upstream base
 - Leaf 26.3 pinned at `0edc7f3b7d79b0e2e16a0ed1df8278c02c73537f`.
 - No newer `ver/26.3` commit was available when this release was prepared.
 
 ## Validation / publishing
-- Build the runnable Paperclip server JAR from the pinned upstream source.
+- Build the runnable Paperclip server JAR.
 - Start and stop real servers with both `balanced` and `extreme` profiles.
 - Verify Warext runtime branding/config generation.
 - Publish `Warext-Server-Engine-26.3.jar`, `SHA256SUMS.txt`, and `UPSTREAM_COMMIT.txt` to GitHub Releases only after successful validation.
-- Fail the workflow if the versioned release does not contain the runnable `.jar` asset.
+- Fail the workflow if the release is missing the runnable `.jar`.
 
-This release remains a prerelease while the 26.3 upstream line is still being stabilized.
+This release remains a prerelease while the Leaf 26.3 line is still being stabilized.
