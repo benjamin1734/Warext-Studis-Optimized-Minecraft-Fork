@@ -2785,19 +2785,9 @@ print("Stage 17: async navigation prepare/trim lifecycle applied.")
 # 32) Paper Pathfinder API is synchronous from the plugin caller's point of view.
 # Do not expose an unfinished AsyncPath to plugins: explicit API path queries finish the request,
 # and getCurrentPath also finalizes navigation preparation before wrapping the result.
-paper_pathfinder_matches = list(root.rglob("PaperPathfinder.java"))
-paper_pathfinder_matches = [
-    path for path in paper_pathfinder_matches
-    if path.as_posix().endswith("/com/destroystokyo/paper/entity/PaperPathfinder.java")
-]
-if len(paper_pathfinder_matches) != 1:
-    raise RuntimeError(
-        "PaperPathfinder generated source: expected 1 match, got "
-        + str(len(paper_pathfinder_matches))
-        + ": "
-        + ", ".join(str(path.relative_to(root)) for path in paper_pathfinder_matches)
-    )
-paper_pathfinder = str(paper_pathfinder_matches[0].relative_to(root))
+paper_pathfinder = "paper-server/src/main/java/com/destroystokyo/paper/entity/PaperPathfinder.java"
+if not (root / paper_pathfinder).is_file():
+    raise RuntimeError("Active PaperPathfinder source not found at " + paper_pathfinder)
 data = read(paper_pathfinder)
 
 current_old = """    public PathResult getCurrentPath() {
