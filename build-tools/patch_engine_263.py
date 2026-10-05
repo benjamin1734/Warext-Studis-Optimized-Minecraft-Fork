@@ -1674,6 +1674,58 @@ print("[ok] async HOME nonblocking wait + result revalidation")
 
 print("Stage 7: async pathfinding POI correctness/p99 fixes applied.")
 
+# NearestBedSensor: never force an unfinished async path to complete on the tick thread.
+# Drop stale work when the mob is no longer a baby, preserve the configured scan interval
+# while work is pending, and revalidate the HOME POI before publishing it to Brain memory.
+nearest_bed = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/sensing/NearestBedSensor.java"
+data = read(nearest_bed)
+old_pending_block = """        if (pending != null) {
+            pending.process();
+            processPath(body, level.getPoiManager(), pending);
+            pending = null;
+        }
+        if (org.dreeam.leaf.config.modules.async.AsyncPathfinding.enabled) {
+            if (--scanTimer > 0) {
+                return;
+            }"""
+new_pending_block = """        if (org.dreeam.leaf.config.modules.async.AsyncPathfinding.enabled && scanTimer > 0) {
+            --scanTimer; // Warext - keep the sensor interval moving while async work is pending
+        }
+        if (pending != null && !body.isBaby()) {
+            pending = null; // Warext - result is no longer relevant
+        }
+        if (pending != null) {
+            if (!pending.isProcessed()) return; // Warext - never block the tick thread
+            processPath(body, level.getPoiManager(), pending);
+            pending = null;
+        }
+        if (org.dreeam.leaf.config.modules.async.AsyncPathfinding.enabled) {
+            if (scanTimer > 0) {
+                return;
+            }"""
+if data.count(old_pending_block) != 1:
+    raise RuntimeError(f"NearestBed pending block: expected 1 match, got {data.count(old_pending_block)}")
+data = data.replace(old_pending_block, new_pending_block, 1)
+
+method_pos = data.find("private void processPath(")
+if method_pos < 0:
+    raise RuntimeError("NearestBed processPath method not found")
+method_end = data.find("// Kaiiju end - petal - async path processing", method_pos)
+if method_end < 0:
+    raise RuntimeError("NearestBed processPath end marker not found")
+segment = data[method_pos:method_end]
+old_home_check = """Optional<Holder<PoiType>> type = poiManager.getType(targetPos);
+            if (type.isPresent()) {"""
+new_home_check = """Optional<Holder<PoiType>> type = poiManager.getType(targetPos);
+            if (type.isPresent() && type.get().is(PoiTypes.HOME)) { // Warext - revalidate stale async result"""
+if segment.count(old_home_check) != 1:
+    raise RuntimeError(f"NearestBed HOME validation: expected 1 match, got {segment.count(old_home_check)}")
+segment = segment.replace(old_home_check, new_home_check, 1)
+data = data[:method_pos] + segment + data[method_end:]
+write(nearest_bed, data)
+print("[ok] async nearest-bed nonblocking wait + HOME revalidation")
+
+
 # 20) Tracker interpolation: accumulate predicted movement in primitives instead of allocating Vec3
 #     on every movement event / merge. Materialize at most one Vec3 when interpolation consumes it.
 tracker_input = """package org.dreeam.leaf.async.tracker;
