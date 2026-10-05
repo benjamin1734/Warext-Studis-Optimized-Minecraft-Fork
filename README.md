@@ -5,7 +5,7 @@ High-performance Minecraft server engine focused on low MSPT, low p95/p99 tick l
 ## Current target
 - Minecraft line: 26.3
 - Java: 25
-- Release line: `26.3-exp.4`
+- Release line: `26.3-exp.5`
 - Goal: minimize MSPT, p95/p99 tick latency, CPU time per tick, allocation/GC pressure and RAM use while preserving broad Paper ecosystem compatibility.
 
 ## Performance profiles
@@ -70,6 +70,7 @@ The automatic scheduler reserves CPU headroom instead of letting every subsystem
 - 4-vCPU balanced pathfinding now uses one steady worker plus a second burst worker behind a bounded queue, reducing the chance of CALLER_RUNS path work falling back onto the main tick thread.
 - Runtime Java 25 startup/shutdown smoke tests for both balanced and extreme profiles.
 - Reproducible builds pinned to a tested upstream commit.
+- Release publishing is gated by balanced/extreme smoke tests and verifies that every versioned GitHub Release contains the runnable server JAR.
 
 ## Validation
 
