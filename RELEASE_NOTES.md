@@ -1,21 +1,25 @@
-# Warext Server Engine 26.3 exp.9
+# Warext Server Engine 26.3 exp.10
 
 Experimental high-performance server engine build for the 26.3 line.
 
-## Async navigation prepare / trim lifecycle
-- Carry per-request reach-range metadata with the generated path instead of relying on callback timing.
-- Prepare each installed asynchronous path exactly once after the worker has completed it.
-- Run navigation `trimPath()` only against a fully processed path so sunlight avoidance and cauldron/path-node corrections are never evaluated against an unfinished route.
-- Keep repeated synchronous `moveTo` calls compatible with normal trimming semantics.
-- Reset prepared-path state whenever navigation recomputes, replaces, stops, or clears a path.
-- Finalize async metadata (target, reach range, stuck timeout) when the installed path becomes ready.
-- Apply the same readiness gate to flying navigation.
-- Prepare wall-climber paths before their early `isDone()` check.
-- Preserve exp.8 Brain.PATH/fallback synchronization and all prior async correctness/performance fixes.
+## Paper pathfinding API compatibility
+- Keep Paper's plugin-facing Pathfinder API synchronous even when server pathfinding is asynchronous internally.
+- `findPath(Location)` and `findPath(Entity)` now finish an unfinished AsyncPath before returning a `PathResult`.
+- `getCurrentPath()` finalizes an unfinished AsyncPath and requires the path to still be the navigation's installed path before exposing it to plugins.
+- Finalize Warext navigation preparation before wrapping a current path so plugin callers do not observe a route before async target/reach-range/trim metadata is ready.
+- Avoid exposing half-populated async path node lists to plugins.
+
+## Existing async path hardening retained
+- One-time async PathNavigation prepare/trim lifecycle.
+- Brain.PATH synchronization and fallback-path correctness.
+- Partial-path preservation and stale-target handling.
+- Nonblocking POI/HOME/nearest-bed handling.
+- Amphibious path-cost isolation and generator-scoped evaluator pools.
+- Bounded queues, adaptive worker budgeting, and 4-vCPU burst protection.
 
 ## Upstream base
 - Leaf 26.3 pinned at `0edc7f3b7d79b0e2e16a0ed1df8278c02c73537f`.
-- No newer `ver/26.3` commit was available when this release was prepared.
+- Frog-specific async NodeEvaluator generation is already present in this upstream base and is not duplicated by Warext.
 
 ## Validation / publishing
 - Build the runnable Paperclip server JAR.
