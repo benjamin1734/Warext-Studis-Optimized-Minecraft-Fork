@@ -1,14 +1,18 @@
-# Warext Server Engine 26.3 exp.5
+# Warext Server Engine 26.3 exp.6
 
 Experimental high-performance server engine build for the 26.3 line.
 
-## Upstream 26.3 refresh
-- Rebase the build target onto Leaf 26.3 commit `0edc7f3b7d79b0e2e16a0ed1df8278c02c73537f`.
-- Carry the October 5 async-tracker correctness fix and current 26.3 tracker/interpolation model.
-- Inherit current 26.3 world-generation cache corrections, zero-movement early-return fix, entity wake-up random change, and Direction#getOpposite regression revert.
-- Keep Warext-specific CPU budgeting, bounded async path queues, allocation reductions, and VoxelBench-driven tuning on top.
-- Reconcile Warext tracker optimizations with the refreshed async-tracker lifecycle instead of restoring obsolete pre-26.3 assumptions.
-- Preserve Warext async mob-spawn stall protection and precipitation lookup optimization while avoiding duplicate upstream logic.
+## Async pathfinding correctness
+- Harden `NearestBedSensor` async path handling based on the relevant Leaf #921 correctness work without importing the incompatible 26.2 patch stack wholesale.
+- Never force an unfinished nearest-bed async path to finish on the main tick thread.
+- Drop a pending nearest-bed path when the mob is no longer a baby and the result is no longer relevant.
+- Keep the sensor scan interval advancing while async work is pending.
+- Revalidate that the resolved POI is still a `HOME` before publishing `NEAREST_BED` into Brain memory.
+- Retain Warext's generator-scoped lock-free NodeEvaluator pools, nonblocking POI/HOME behavior handling, bounded queues, and 4-vCPU burst protection.
+
+## Upstream base
+- Leaf 26.3 pinned at `0edc7f3b7d79b0e2e16a0ed1df8278c02c73537f`.
+- Includes the October 5 async tracker fix and the current 26.3 tracker/interpolation model.
 
 ## Validation / publishing
 - Build the runnable Paperclip server JAR from the pinned upstream source.
