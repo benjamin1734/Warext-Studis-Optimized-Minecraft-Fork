@@ -2570,6 +2570,219 @@ data = data.replace(old_tick_async, new_tick_async, 1)
 write(move_sink, data)
 print("[ok] async MoveToTargetSink fallback/Brain.PATH synchronization")
 
+# 31) PathNavigation async prepare/trim lifecycle.
+# Carry reach-range metadata with each path request and prepare each installed AsyncPath exactly once
+# after processing completes. This guarantees trimPath() corrections (sun avoidance, cauldron fixes,
+# etc.) execute only against a complete path while still allowing repeated synchronous moveTo calls.
+path_java = "leaf-server/src/minecraft/java/net/minecraft/world/level/pathfinder/Path.java"
+data = read(path_java)
+path_field_anchor = "    private final boolean reached;"
+if data.count(path_field_anchor) != 1:
+    raise RuntimeError(f"Path reach metadata field anchor: expected 1 match, got {data.count(path_field_anchor)}")
+data = data.replace(
+    path_field_anchor,
+    path_field_anchor + "\n    public int warext$reachRange = -1;",
+    1,
+)
+copy_anchor = "        result.nextNodeIndex = this.nextNodeIndex;"
+if data.count(copy_anchor) == 1:
+    data = data.replace(
+        copy_anchor,
+        copy_anchor + "\n        result.warext$reachRange = this.warext$reachRange;",
+        1,
+    )
+write(path_java, data)
+print("[ok] async path reach-range metadata")
+
+path_nav = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/navigation/PathNavigation.java"
+data = read(path_nav)
+
+path_field = "    protected @Nullable Path path;"
+if data.count(path_field) != 1:
+    raise RuntimeError(f"PathNavigation path field: expected 1 match, got {data.count(path_field)}")
+data = data.replace(
+    path_field,
+    path_field + "\n    private @Nullable Path warext$preparedPath;",
+    1,
+)
+
+# Recalculation must reset prepared-state whenever it replaces the installed request.
+recompute_old = """            this.path = null;
+            this.path = this.createPath(this.targetPos, this.reachRange);"""
+if data.count(recompute_old) != 1:
+    raise RuntimeError(f"PathNavigation recompute path install: expected 1 match, got {data.count(recompute_old)}")
+data = data.replace(
+    recompute_old,
+    """            this.warext$setPath(null);
+            this.warext$setPath(this.createPath(this.targetPos, this.reachRange));""",
+    1,
+)
+
+# Replace the older callback-based async createPath metadata update with request-local metadata.
+create_old = """        // Kaiiju start - petal - async path processing
+        if (org.dreeam.leaf.config.modules.async.AsyncPathfinding.enabled) {
+            // assign early a target position. most calls will only have 1 position
+            if (!targets.isEmpty()) this.targetPos = targets.iterator().next();
+
+            org.dreeam.leaf.async.path.AsyncPathProcessor.awaitProcessing(path, processedPath -> {
+                // check that processing didn't take so long that we calculated a new path
+                if (processedPath != this.path) return;
+
+                if (processedPath != null && processedPath.getTarget() != null) {
+                    this.targetPos = processedPath.getTarget();
+                    this.reachRange = reachRange;
+                    this.resetStuckTimeout();
+                }
+            });
+        } else {
+            // Kaiiju end - petal - async path processing
+        if (path != null && path.getTarget() != null) {
+            this.targetPos = path.getTarget();
+            this.reachRange = reachRange;
+            this.resetStuckTimeout();
+        }
+        } // Kaiiju - petal - async path processing"""
+create_new = """        // Warext - carry navigation metadata with the request and finalize it only after processing.
+        if (path != null) {
+            path.warext$reachRange = reachRange;
+            if (path instanceof org.dreeam.leaf.async.path.AsyncPath && !path.isProcessed()) {
+                if (!targets.isEmpty()) path.target = targets.iterator().next();
+            } else if (path.getTarget() != null) {
+                this.targetPos = path.getTarget();
+                this.reachRange = reachRange;
+                this.resetStuckTimeout();
+            }
+        }"""
+if data.count(create_old) != 1:
+    raise RuntimeError(f"PathNavigation callback createPath block: expected 1 match, got {data.count(create_old)}")
+data = data.replace(create_old, create_new, 1)
+
+# Patch moveTo in-place while preserving the version-specific timeout bookkeeping tail.
+move_start = data.find("    public boolean moveTo(final @Nullable Path newPath, final double speedModifier) {")
+if move_start < 0:
+    raise RuntimeError("PathNavigation moveTo method not found")
+get_path_pos = data.find("    public @Nullable Path getPath() {", move_start)
+if get_path_pos < 0:
+    raise RuntimeError("PathNavigation getPath anchor not found")
+move_segment = data[move_start:get_path_pos]
+
+if move_segment.count("            this.path = null;") != 1:
+    raise RuntimeError(f"PathNavigation moveTo null install: expected 1 match, got {move_segment.count('            this.path = null;')}")
+move_segment = move_segment.replace("            this.path = null;", "            this.warext$setPath(null);", 1)
+
+if move_segment.count("            this.path = newPath;") != 1:
+    raise RuntimeError(f"PathNavigation moveTo new install: expected 1 match, got {move_segment.count('            this.path = newPath;')}")
+move_segment = move_segment.replace("            this.path = newPath;", "            this.warext$setPath(newPath);", 1)
+
+done_pos = move_segment.find("        if (this.isDone()) {")
+speed_pos = move_segment.find("        this.speedModifier = speedModifier;")
+if done_pos < 0 or speed_pos < 0 or speed_pos <= done_pos:
+    raise RuntimeError("PathNavigation moveTo preparation anchors not found")
+prepare_block = """        final Path installedPath = this.path;
+        if (installedPath == null) return false;
+        final boolean needsAsyncPreparation =
+            installedPath instanceof org.dreeam.leaf.async.path.AsyncPath && this.warext$preparedPath != installedPath;
+        if (installedPath.isProcessed()) {
+            if (this.path != installedPath || !this.warext$preparePath()) return false;
+            if (!needsAsyncPreparation) {
+                this.trimPath(); // Warext - repeated moveTo still applies current sun/cauldron corrections
+                if (this.path != installedPath || installedPath.getNodeCount() <= 0) return false;
+            }
+        }
+
+"""
+move_segment = move_segment[:done_pos] + prepare_block + move_segment[speed_pos:]
+
+helpers = """    private void warext$setPath(final @Nullable Path path) {
+        this.path = path;
+        this.warext$preparedPath = null;
+        if (path instanceof org.dreeam.leaf.async.path.AsyncPath) {
+            this.targetPos = path.target;
+            if (path.warext$reachRange >= 0) this.reachRange = path.warext$reachRange;
+        }
+    }
+
+    public boolean warext$preparePath() {
+        final Path installedPath = this.path;
+        if (installedPath == null || !installedPath.isProcessed() || this.path != installedPath) return false;
+        if (this.warext$preparedPath != installedPath) {
+            this.warext$preparedPath = installedPath;
+            if (installedPath instanceof org.dreeam.leaf.async.path.AsyncPath) {
+                if (installedPath.getTarget() != null) {
+                    this.targetPos = installedPath.getTarget();
+                    if (installedPath.warext$reachRange >= 0) this.reachRange = installedPath.warext$reachRange;
+                    this.resetStuckTimeout();
+                }
+                if (!installedPath.isDone()) this.trimPath();
+            }
+        }
+        return this.path == installedPath && !installedPath.isDone();
+    }
+
+"""
+data = data[:move_start] + move_segment + helpers + data[get_path_pos:]
+
+pending_tick_guard = "        if (this.path != null && !this.path.isProcessed()) return; // Kaiiju - petal - async path processing - skip pathfinding if we're still processing"
+if data.count(pending_tick_guard) != 1:
+    raise RuntimeError(f"PathNavigation pending tick guard: expected 1 match, got {data.count(pending_tick_guard)}")
+data = data.replace(
+    pending_tick_guard,
+    "        if (!this.warext$preparePath()) return; // Warext - prepare completed async path exactly once",
+    1,
+)
+
+stop_old = """    public void stop() {
+        this.path = null;
+    }"""
+if data.count(stop_old) != 1:
+    raise RuntimeError(f"PathNavigation stop path install: expected 1 match, got {data.count(stop_old)}")
+data = data.replace(
+    stop_old,
+    """    public void stop() {
+        this.warext$setPath(null);
+    }""",
+    1,
+)
+
+write(path_nav, data)
+print("[ok] async PathNavigation one-time prepare/trim lifecycle")
+
+# Flying navigation overrides tick(), so it needs the same completion gate.
+flying_nav = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/navigation/FlyingPathNavigation.java"
+data = read(flying_nav)
+flying_guard = "        if (this.path != null && !this.path.isProcessed()) return; // Kaiiju - petal - async path processing"
+if data.count(flying_guard) != 1:
+    raise RuntimeError(f"FlyingPathNavigation pending guard: expected 1 match, got {data.count(flying_guard)}")
+data = data.replace(
+    flying_guard,
+    "        if (!this.warext$preparePath()) return; // Warext - finalize async path before flight navigation",
+    1,
+)
+write(flying_nav, data)
+print("[ok] flying async path preparation gate")
+
+# Wall climbers inspect isDone() before delegating to the base tick, so prepare first.
+wall_nav = "leaf-server/src/minecraft/java/net/minecraft/world/entity/ai/navigation/WallClimberNavigation.java"
+data = read(wall_nav)
+wall_tick = """    @Override
+    public void tick() {
+        if (!this.isDone()) {"""
+if data.count(wall_tick) != 1:
+    raise RuntimeError(f"WallClimberNavigation tick anchor: expected 1 match, got {data.count(wall_tick)}")
+data = data.replace(
+    wall_tick,
+    """    @Override
+    public void tick() {
+        this.warext$preparePath();
+        if (!this.isDone()) {""",
+    1,
+)
+write(wall_nav, data)
+print("[ok] wall-climber async path preparation")
+
+print("Stage 17: async navigation prepare/trim lifecycle applied.")
+
+
 
 # 29) Amphibious async pathfinding: keep temporary WALKABLE/WATER_BORDER costs local
 #     to the evaluator. The vanilla evaluator mutates Mob pathfinding malus state during prepare()
