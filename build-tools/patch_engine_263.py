@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from pathlib import Path
 import sys
+import re
 
 root = Path(sys.argv[1]).resolve()
 
@@ -2404,6 +2405,98 @@ write(move_sink, data)
 print("[ok] async MoveToTargetSink stale-target guard")
 
 print("Stage 14: async path behavior lifecycle cleanup applied.")
+
+# 29) Amphibious async pathfinding: keep temporary WALKABLE/WATER_BORDER costs local
+#     to the evaluator. The vanilla evaluator mutates Mob pathfinding malus state during prepare()
+#     and restores it in done(); with pooled async evaluators that temporary global mutation can
+#     overlap another path request for the same mob. Route all WalkNodeEvaluator malus reads
+#     through an overridable helper, then let AmphibiousNodeEvaluator provide local costs.
+walk_eval = "leaf-server/src/minecraft/java/net/minecraft/world/level/pathfinder/WalkNodeEvaluator.java"
+data = read(walk_eval)
+
+walk_this_count = data.count("this.mob.getPathfindingMalus(")
+walk_param_count = data.count("mob.getPathfindingMalus(")
+if walk_this_count + walk_param_count < 5:
+    raise RuntimeError(
+        f"WalkNodeEvaluator malus reads: expected at least 5 matches, got "
+        f"{walk_this_count + walk_param_count}"
+    )
+
+data = data.replace("this.mob.getPathfindingMalus(", "this.getPathfindingMalus(this.mob, ")
+data = data.replace("mob.getPathfindingMalus(", "this.getPathfindingMalus(mob, ")
+
+walk_anchor = """    @Override
+    public Node getStart() {"""
+if data.count(walk_anchor) != 1:
+    raise RuntimeError(f"WalkNodeEvaluator getStart anchor: expected 1 match, got {data.count(walk_anchor)}")
+walk_helper = """    protected float getPathfindingMalus(final Mob mob, final PathType pathType) {
+        return mob.getPathfindingMalus(pathType);
+    }
+
+"""
+data = data.replace(walk_anchor, walk_helper + walk_anchor, 1)
+write(walk_eval, data)
+print("[ok] WalkNodeEvaluator overridable malus lookup")
+
+amph_eval = "leaf-server/src/minecraft/java/net/minecraft/world/level/pathfinder/AmphibiousNodeEvaluator.java"
+data = read(amph_eval)
+
+fields_pattern = re.compile(
+    r"\n    private float oldWalkableCost;\n"
+    r"    private float oldWaterBorderCost;\n"
+)
+data, field_subs = fields_pattern.subn("\n", data, count=1)
+if field_subs != 1:
+    raise RuntimeError(f"Amphibious temporary malus fields: expected 1 match, got {field_subs}")
+
+prepare_pattern = re.compile(
+    r"\n        this\.oldWalkableCost = entity\.getPathfindingMalus\(PathType\.WALKABLE\);\n"
+    r"        entity\.setPathfindingMalus\(PathType\.WALKABLE, 6\.0F\);\n"
+    r"        this\.oldWaterBorderCost = entity\.getPathfindingMalus\(PathType\.WATER_BORDER\);\n"
+    r"        entity\.setPathfindingMalus\(PathType\.WATER_BORDER, 4\.0F\);"
+)
+data, prepare_subs = prepare_pattern.subn("", data, count=1)
+if prepare_subs != 1:
+    raise RuntimeError(f"Amphibious prepare malus mutation: expected 1 match, got {prepare_subs}")
+
+done_pattern = re.compile(
+    r"\n    @Override\n"
+    r"    public void done\(\) \{\n"
+    r"        this\.mob\.setPathfindingMalus\(PathType\.WALKABLE, this\.oldWalkableCost\);\n"
+    r"        this\.mob\.setPathfindingMalus\(PathType\.WATER_BORDER, this\.oldWaterBorderCost\);\n"
+    r"        super\.done\(\);\n"
+    r"    \}\n"
+)
+data, done_subs = done_pattern.subn("\n", data, count=1)
+if done_subs != 1:
+    raise RuntimeError(f"Amphibious done malus restore: expected 1 match, got {done_subs}")
+
+# Route any remaining direct Mob malus reads in this evaluator through the helper.
+data = data.replace("this.mob.getPathfindingMalus(", "this.getPathfindingMalus(this.mob, ")
+data = data.replace("mob.getPathfindingMalus(", "this.getPathfindingMalus(mob, ")
+
+amph_anchor = """    @Override
+    public Node getStart() {"""
+if data.count(amph_anchor) != 1:
+    raise RuntimeError(f"Amphibious getStart anchor: expected 1 match, got {data.count(amph_anchor)}")
+amph_helper = """    @Override
+    protected float getPathfindingMalus(final Mob mob, final PathType pathType) {
+        if (mob == this.mob) {
+            if (pathType == PathType.WALKABLE) {
+                return 6.0F;
+            }
+            if (pathType == PathType.WATER_BORDER) {
+                return 4.0F;
+            }
+        }
+        return super.getPathfindingMalus(mob, pathType);
+    }
+
+"""
+data = data.replace(amph_anchor, amph_helper + amph_anchor, 1)
+write(amph_eval, data)
+print("[ok] amphibious pathfinding malus isolation")
+
 
 
 # 27) Cache Entity#getEncodeId(): entity type is immutable for an entity's lifetime, so repeated
