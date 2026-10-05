@@ -168,22 +168,20 @@ replace_once(
 # Tracker: double-buffer capture map and reuse growing entity snapshot.
 replace_once(
     "leaf-server/src/main/java/org/dreeam/leaf/async/tracker/AsyncTracker.java",
-    """    private final Reference2ReferenceOpenHashMap<ChunkMap.TrackedEntity, TrackerInput> trackers = new Reference2ReferenceOpenHashMap<>();
-    private final Reference2ReferenceOpenHashMap<ChunkMap.TrackedEntity, TrackerInput> capture = new Reference2ReferenceOpenHashMap<>();""",
-    """    private final Reference2ReferenceOpenHashMap<ChunkMap.TrackedEntity, TrackerInput> trackers = new Reference2ReferenceOpenHashMap<>();
-    private Reference2ReferenceOpenHashMap<ChunkMap.TrackedEntity, TrackerInput> capture = new Reference2ReferenceOpenHashMap<>();
+    """    private final Reference2ReferenceOpenHashMap<ChunkMap.TrackedEntity, TrackerInput> capture = new Reference2ReferenceOpenHashMap<>();""",
+    """    private Reference2ReferenceOpenHashMap<ChunkMap.TrackedEntity, TrackerInput> capture = new Reference2ReferenceOpenHashMap<>();
     private Reference2ReferenceOpenHashMap<ChunkMap.TrackedEntity, TrackerInput> captureSpare = new Reference2ReferenceOpenHashMap<>();
-    private ChunkMap.TrackedEntity[] trackerSnapshot = new ChunkMap.TrackedEntity[0];""",
+    private Entity[] trackerSnapshot = new Entity[0];""",
     "tracker reusable buffers",
 )
 
 replace_once(
     "leaf-server/src/main/java/org/dreeam/leaf/async/tracker/AsyncTracker.java",
-    """    public void tick(final ServerLevel world) {
+    """    public void tick(final ServerLevel world, final ReferenceList<Entity> entities) {
         Reference2ReferenceOpenHashMap<ChunkMap.TrackedEntity, TrackerInput> cap = capture.clone();
         capture.clear();
         handlePlayer(world);""",
-    """    public void tick(final ServerLevel world) {
+    """    public void tick(final ServerLevel world, final ReferenceList<Entity> entities) {
         Reference2ReferenceOpenHashMap<ChunkMap.TrackedEntity, TrackerInput> cap = this.capture;
         this.capture = this.captureSpare;
         this.captureSpare = cap;
@@ -194,18 +192,18 @@ replace_once(
 
 replace_once(
     "leaf-server/src/main/java/org/dreeam/leaf/async/tracker/AsyncTracker.java",
-    """        ChunkMap.TrackedEntity[] raw = new ChunkMap.TrackedEntity[len];
-        System.arraycopy(trackersRef.getRawDataUnchecked(), 0, raw, 0, len);
+    """        Entity[] raw = new Entity[len];
+        System.arraycopy(entities.getRawDataUnchecked(), 0, raw, 0, len);
         TrackerSlice slice = new TrackerSlice(raw);""",
     """        if (this.trackerSnapshot.length < len) {
             int newCapacity = Math.max(64, this.trackerSnapshot.length);
             while (newCapacity < len) {
                 newCapacity <<= 1;
             }
-            this.trackerSnapshot = new ChunkMap.TrackedEntity[newCapacity];
+            this.trackerSnapshot = new Entity[newCapacity];
         }
-        ChunkMap.TrackedEntity[] raw = this.trackerSnapshot;
-        System.arraycopy(trackersRef.getRawDataUnchecked(), 0, raw, 0, len);
+        Entity[] raw = this.trackerSnapshot;
+        System.arraycopy(entities.getRawDataUnchecked(), 0, raw, 0, len);
         TrackerSlice slice = new TrackerSlice(raw, 0, len);""",
     "tracker snapshot reuse",
 )
@@ -1219,17 +1217,19 @@ import ca.spottedleaf.moonrise.patches.chunk_system.entity.ChunkSystemEntity;
 import ca.spottedleaf.moonrise.patches.chunk_system.level.chunk.ChunkData;
 import it.unimi.dsi.fastutil.objects.Reference2ReferenceOpenHashMap;
 import net.minecraft.server.level.ChunkMap;
+import net.minecraft.server.level.FullChunkStatus;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
+import org.jspecify.annotations.NullMarked;
 
 import java.util.concurrent.Callable;
 
+@NullMarked
 public record TrackerTask(
     ServerLevel world,
-    ChunkMap.TrackedEntity[] trackers,
+    Entity[] entities,
     int start,
     int end,
-    Reference2ReferenceOpenHashMap<ChunkMap.TrackedEntity, TrackerInput> inputs,
     Reference2ReferenceOpenHashMap<ChunkMap.TrackedEntity, TrackerInput> cap,
     TrackerCtx context
 ) implements Callable<TrackerCtx> {
@@ -1237,11 +1237,11 @@ public record TrackerTask(
     @Override
     public TrackerCtx call() {
         final TrackerCtx ctx = this.context;
-        final ChunkMap.TrackedEntity[] raw = this.trackers;
+        final Entity[] raw = this.entities;
         for (int i = this.start; i < this.end; i++) {
-            final ChunkMap.TrackedEntity tracker = raw[i];
-            final Entity entity = tracker.serverEntity.entity;
-            if (entity.moonrise$getTrackedEntity() != tracker) {
+            final Entity entity = raw[i];
+            final ChunkMap.TrackedEntity tracker = entity.moonrise$getTrackedEntity();
+            if (tracker == null || !tracker.serverEntity.leaf$isInLevel(this.world)) {
                 continue;
             }
             if (tracker.getClass() != ChunkMap.TrackedEntity.class) {
@@ -1249,7 +1249,7 @@ public record TrackerTask(
                 continue;
             }
 
-            TrackerInput input = inputs.get(tracker);
+            TrackerInput input = tracker.serverEntity.leaf$trackerInput;
             TrackerInput patch = cap.get(tracker);
             if (patch != null) {
                 input.apply(patch);
@@ -1258,8 +1258,8 @@ public record TrackerTask(
             ChunkData chunkData = ((ChunkSystemEntity) entity).moonrise$getChunkData();
             boolean sendChanges = tracker.leaf$tick(ctx, chunkData == null ? null : chunkData.nearbyPlayers);
             if (!sendChanges) {
-                net.minecraft.server.level.FullChunkStatus status = entity.moonrise$getChunkStatus();
-                sendChanges = status != null && status.isOrAfter(net.minecraft.server.level.FullChunkStatus.ENTITY_TICKING);
+                FullChunkStatus status = entity.moonrise$getChunkStatus();
+                sendChanges = status != null && status.isOrAfter(FullChunkStatus.ENTITY_TICKING);
             }
             if (sendChanges || entity.needsSync) {
                 tracker.serverEntity.leaf$sendChanges(ctx, tracker, input, false);
@@ -1276,15 +1276,15 @@ async_tracker = "leaf-server/src/main/java/org/dreeam/leaf/async/tracker/AsyncTr
 replace_once(
     async_tracker,
     """    private Reference2ReferenceOpenHashMap<ChunkMap.TrackedEntity, TrackerInput> captureSpare = new Reference2ReferenceOpenHashMap<>();
-    private ChunkMap.TrackedEntity[] trackerSnapshot = new ChunkMap.TrackedEntity[0];""",
+    private Entity[] trackerSnapshot = new Entity[0];""",
     """    private Reference2ReferenceOpenHashMap<ChunkMap.TrackedEntity, TrackerInput> captureSpare = new Reference2ReferenceOpenHashMap<>();
-    private ChunkMap.TrackedEntity[] trackerSnapshot = new ChunkMap.TrackedEntity[0];
+    private Entity[] trackerSnapshot = new Entity[0];
     private final java.util.ArrayDeque<TrackerCtx> trackerCtxPool = new java.util.ArrayDeque<>();""",
     "tracker context pool field",
 )
 
-old_slice_block = """        ChunkMap.TrackedEntity[] raw = this.trackerSnapshot;
-        System.arraycopy(trackersRef.getRawDataUnchecked(), 0, raw, 0, len);
+old_slice_block = """        Entity[] raw = this.trackerSnapshot;
+        System.arraycopy(entities.getRawDataUnchecked(), 0, raw, 0, len);
         TrackerSlice slice = new TrackerSlice(raw, 0, len);
 
         ThreadPool exec = Objects.requireNonNull(TRACKER_EXECUTOR);
@@ -1293,13 +1293,13 @@ old_slice_block = """        ChunkMap.TrackedEntity[] raw = this.trackerSnapshot
         @SuppressWarnings("unchecked")
         Future<TrackerCtx>[] futures = new Future[slices.length];
         for (int i = 0; i < futures.length; i++) {
-            futures[i] = exec.submitOrRun(new TrackerTask(world, slices[i], trackers, cap));
+            futures[i] = exec.submitOrRun(new TrackerTask(world, slices[i], cap));
         }
         exec.unpark();
         this.fut = futures;"""
 
-new_range_block = """        ChunkMap.TrackedEntity[] raw = this.trackerSnapshot;
-        System.arraycopy(trackersRef.getRawDataUnchecked(), 0, raw, 0, len);
+new_range_block = """        Entity[] raw = this.trackerSnapshot;
+        System.arraycopy(entities.getRawDataUnchecked(), 0, raw, 0, len);
 
         ThreadPool exec = Objects.requireNonNull(TRACKER_EXECUTOR);
         final int min = Math.max(1, MultithreadedTracker.minEntitiesPerTask);
@@ -1331,7 +1331,7 @@ new_range_block = """        ChunkMap.TrackedEntity[] raw = this.trackerSnapshot
             } else {
                 ctx.reset();
             }
-            futures[i] = exec.submitOrRun(new TrackerTask(world, raw, start, end, trackers, cap, ctx));
+            futures[i] = exec.submitOrRun(new TrackerTask(world, raw, start, end, cap, ctx));
         }
         exec.unpark();
         this.fut = futures;"""
@@ -1386,7 +1386,7 @@ replace_once(
 
 # Remove the now-unused TrackerSlice import.
 data = read(async_tracker)
-data = data.replace("import org.dreeam.leaf.util.TrackerSlice;\\n", "")
+data = data.replace("import org.dreeam.leaf.util.TrackerSlice;\n", "")
 write(async_tracker, data)
 print("[ok] tracker slice import cleanup")
 
