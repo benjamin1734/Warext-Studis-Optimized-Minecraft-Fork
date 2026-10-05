@@ -1,37 +1,21 @@
-# Warext Server Engine 26.3 exp.4
+# Warext Server Engine 26.3 exp.5
 
 Experimental high-performance server engine build for the 26.3 line.
 
-## Main changes
-- Shared adaptive CPU budget for pathfinding, entity tracking and async save/compression workers.
-- Multi-core async pathfinding with safer queue policy, evaluator isolation and reduced synchronization.
-- Async entity-tracker allocation reductions, reusable contexts, reusable packet buffers and primitive interpolation accumulation.
-- Async player/world save coalescing with compression moved off the tick thread and safer write ordering.
-- Async mob-spawn recovery so worker failures do not permanently stop natural spawning.
-- Entity activation, despawn and natural-spawn spatial lookup allocation reductions.
-- Adaptive linear nearest-player fast path for small player counts.
-- Chunk cache p99 protection by avoiding hot-path shrink rehashes.
-- Collision step buffer reuse.
-- Precipitation/random-tick lookup reuse.
-- Async path lifecycle cleanup, bounded path queues and evaluator-pool retention limits.
-- Entity encode-id caching and reusable tracker Future/join wrapper arrays.
-- Light packet ThreadLocal buffer reference cleanup to reduce retained heap.
-- Real Java 25 startup/shutdown smoke tests in CI for both balanced and extreme profiles.
-- Product-facing branding standardized as Warext Server Engine.
-- VoxelBench baseline `vxb_ho3bolny` tuning:
-  - Balanced profile now enables Dynamic Activation of Brain while retaining the upstream compatibility blacklist.
-  - Balanced profile also enables the optimized KD-tree entity-activation implementation without changing configured activation ranges.
-  - Balanced 4-vCPU hosts use one async pathfinding worker to preserve main-thread/GC/Netty headroom.
-  - New Paper world configs default to Alternate Current redstone.
-  - Chunk packet block-entity metadata is pre-sized to reduce transient allocation/growth churn.
-  - NBT writes to packet buffers reuse a thread-local DataOutput adapter instead of allocating a ByteBufOutputStream wrapper per object.
-- VoxelBench follow-up `vxb_tbaakena` tuning:
-  - Nearest-item sensing reuses a private scratch list instead of allocating on each scan.
-  - Nearest-living/player result lists are deliberately not pooled because they are published into Brain memory; preserving their reference lifetime takes priority over a speculative allocation win.
-  - NBT modified-UTF writes use a Netty bulk ASCII fast path for common keys/strings.
-  - Non-ASCII modified-UTF writes use a bounded thread-local byte buffer to reduce per-byte calls and transient allocation.
-  - Existing Minecraft sensor start randomization is intentionally preserved; no duplicate staggering or reduced AI tick frequency is introduced.
-  - On 4-vCPU balanced hosts, async pathfinding keeps one steady worker and allows a second burst worker after queue saturation; the default queue remains bounded so backlog cannot grow without limit.
+## Upstream 26.3 refresh
+- Rebase the build target onto Leaf 26.3 commit `0edc7f3b7d79b0e2e16a0ed1df8278c02c73537f`.
+- Carry the October 5 async-tracker correctness fix and current 26.3 tracker/interpolation model.
+- Inherit current 26.3 world-generation cache corrections, zero-movement early-return fix, entity wake-up random change, and Direction#getOpposite regression revert.
+- Keep Warext-specific CPU budgeting, bounded async path queues, allocation reductions, and VoxelBench-driven tuning on top.
+- Reconcile Warext tracker optimizations with the refreshed async-tracker lifecycle instead of restoring obsolete pre-26.3 assumptions.
+- Preserve Warext async mob-spawn stall protection and precipitation lookup optimization while avoiding duplicate upstream logic.
+
+## Validation / publishing
+- Build the runnable Paperclip server JAR from the pinned upstream source.
+- Start and stop real servers with both `balanced` and `extreme` profiles.
+- Verify Warext runtime branding/config generation.
+- Publish `Warext-Server-Engine-26.3.jar`, `SHA256SUMS.txt`, and `UPSTREAM_COMMIT.txt` to GitHub Releases only after successful validation.
+- Fail the workflow if the versioned release does not contain the runnable `.jar` asset.
 
 ## Profiles
 - `compatibility`: conservative async defaults.
@@ -40,4 +24,4 @@ Experimental high-performance server engine build for the 26.3 line.
 
 Select with `-Dwarext.profile=balanced` or `-Dwarext.profile=extreme`.
 
-This release remains a prerelease because the 26.3 upstream base is still under active development.
+This release remains a prerelease while the 26.3 upstream line is still being stabilized.
