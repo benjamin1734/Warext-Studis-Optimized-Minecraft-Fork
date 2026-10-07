@@ -226,18 +226,17 @@ jobs:
             cd "$DIR"
 
             printf 'eula=true\n' > eula.txt
-            cat > server.properties <<EOF
-online-mode=false
-server-port=25572
-level-seed=8675309
-level-type=minecraft:normal
-view-distance=2
-simulation-distance=2
-spawn-protection=0
-max-players=1
-enable-query=false
-enable-rcon=false
-EOF
+            printf '%s\\n' \\
+              'online-mode=false' \\
+              'server-port=25572' \\
+              'level-seed=8675309' \\
+              'level-type=minecraft:normal' \\
+              'view-distance=2' \\
+              'simulation-distance=2' \\
+              'spawn-protection=0' \\
+              'max-players=1' \\
+              'enable-query=false' \\
+              'enable-rcon=false' > server.properties
 
             mkfifo console.aquifer.pipe
             exec 6<>console.aquifer.pipe
