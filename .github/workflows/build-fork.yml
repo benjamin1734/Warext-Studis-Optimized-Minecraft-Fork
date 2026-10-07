@@ -162,6 +162,31 @@ jobs:
                 cat config/warext-global.yml
                 exit 1
               }
+
+              grep -A6 "end-biome-cache:" config/warext-global.yml | grep -q "enabled: true" || {
+                echo "Pregeneration profile did not enable the End biome cache"
+                grep -A8 -n "end-biome-cache:" config/warext-global.yml || true
+                cat config/warext-global.yml
+                exit 1
+              }
+
+              # Exercise real End worldgen outside the central-island fast path so the
+              # erosion-based biome resolver and Warext cache are used.
+              echo "execute in minecraft:the_end run forceload add 2048 2048" >&3
+              sleep 10
+              kill -0 "$PID" 2>/dev/null || {
+                echo "Pregeneration profile exited during End worldgen smoke"
+                cat server.log
+                exit 1
+              }
+              echo "save-all flush" >&3
+              sleep 4
+              if grep -Eq "Exception|ERROR|Failed to load|Failed to save|worldgen.*error|biome.*error" server.log; then
+                echo "End worldgen smoke emitted an error"
+                cat server.log
+                exit 1
+              fi
+              echo "execute in minecraft:the_end run forceload remove 2048 2048" >&3
             fi
 
             echo "warext version" >&3
