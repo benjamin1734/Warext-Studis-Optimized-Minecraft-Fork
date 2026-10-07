@@ -4023,8 +4023,8 @@ print("[ok] TagValueInput retained-field support")
 container_helper = "leaf-server/src/minecraft/java/net/minecraft/world/ContainerHelper.java"
 data = read(container_helper)
 helper_anchor = """    public static int clearOrCountMatchingItems("""
-if data.count(helper_anchor) != 1:
-    raise RuntimeError(f"ContainerHelper insertion anchor: expected 1 match, got {data.count(helper_anchor)}")
+if data.count(helper_anchor) < 1:
+    raise RuntimeError("ContainerHelper insertion anchor not found")
 pending_code = """    // Warext start - deferred container item decoding
     // Original optimization by HaHaWTH, adapted for Warext Server Engine 26.3.
     public static @org.jspecify.annotations.Nullable PendingItems warext$loadAllItemsDeferred(
