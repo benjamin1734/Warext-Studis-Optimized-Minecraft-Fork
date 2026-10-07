@@ -155,6 +155,15 @@ jobs:
               exit 1
             fi
 
+            if [ "$PROFILE" = "pregeneration" ]; then
+              grep -A6 "chunk-io-pending-write-limit:" config/warext-global.yml | grep -q "enabled: true" || {
+                echo "Pregeneration profile did not enable the chunk I/O pending-write guard"
+                grep -A8 -n "chunk-io-pending-write-limit:" config/warext-global.yml || true
+                cat config/warext-global.yml
+                exit 1
+              }
+            fi
+
             echo "warext version" >&3
             sleep 3
             grep -q "Warext Server Engine experimental build" server.log || {
