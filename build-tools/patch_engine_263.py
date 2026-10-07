@@ -4528,6 +4528,127 @@ print("[ok] pregeneration-aware Moonrise chunk worker policy")
 print("Stage 24: 4-vCPU Chunky/worldgen worker allocation applied.")
 
 
+
+
+# 38) Bounded chunk NBT pending-write pressure guard.
+# C2ME/DivineMC style cache limiting is useful during high-rate pregeneration, but a hard
+# unbounded flush can itself create latency spikes. Warext uses a profile-aware soft/hard
+# threshold with a small capped drain burst per IOWorker scheduling turn.
+chunk_io_config = '''package org.dreeam.leaf.config.modules.opt;
+
+import org.dreeam.leaf.config.ConfigCategory;
+import org.dreeam.leaf.config.ConfigModule;
+
+public class ChunkIoPendingWriteLimit extends ConfigModule {
+
+    public String basePath() {
+        return ConfigCategory.PERF.basePath() + ".chunk-io-pending-write-limit";
+    }
+
+    public static boolean enabled =
+        org.dreeam.leaf.performance.WarextPerformanceProfile.isPregeneration();
+
+    public static int softLimit = defaultSoftLimit();
+    public static int hardLimit = softLimit * 2;
+    public static int maxExtraDrainsPerTurn = 4;
+
+    private static int defaultSoftLimit() {
+        final long heapMiB = Runtime.getRuntime().maxMemory() / (1024L * 1024L);
+        if (heapMiB < 4096L) return 2048;
+        if (heapMiB < 8192L) return 4096;
+        if (heapMiB < 16384L) return 8192;
+        return 16384;
+    }
+
+    @Override
+    public void onLoaded() {
+        enabled = globalConfig.getBoolean(basePath() + ".enabled", enabled);
+        softLimit = Math.max(256, globalConfig.getInt(basePath() + ".soft-limit", softLimit));
+        hardLimit = Math.max(softLimit + 256, globalConfig.getInt(basePath() + ".hard-limit", Math.max(hardLimit, softLimit * 2)));
+        maxExtraDrainsPerTurn = Math.max(1, Math.min(16, globalConfig.getInt(
+            basePath() + ".max-extra-drains-per-turn",
+            maxExtraDrainsPerTurn
+        )));
+        globalConfig.addCommentRegionBased(
+            basePath(),
+            """
+            Bounds queued chunk NBT writes during sustained pregeneration.
+            Enabled by default only in the Warext pregeneration profile.
+            Soft pressure adds a small extra drain; hard pressure drains more aggressively,
+            but every scheduling turn is capped to avoid creating an I/O latency spike.
+            """,
+            """
+            持续区块预生成时限制待写入的区块 NBT 队列。
+            默认仅在 Warext pregeneration 配置中启用。
+            软阈值会少量增加写出；硬阈值会更积极地写出，
+            但每轮都有上限，避免造成 I/O 延迟尖峰。
+            """
+        );
+    }
+}
+'''
+write("leaf-server/src/main/java/org/dreeam/leaf/config/modules/opt/ChunkIoPendingWriteLimit.java", chunk_io_config)
+print("[ok] profile-aware chunk I/O pending-write config")
+
+io_worker = "leaf-server/src/minecraft/java/net/minecraft/world/level/chunk/storage/IOWorker.java"
+data = read(io_worker)
+
+store_anchor = """    private void storePendingChunk() {
+        Entry<ChunkPos, IOWorker.PendingStore> entry = this.pendingWrites.pollFirstEntry();"""
+if data.count(store_anchor) != 1:
+    raise RuntimeError(f"IOWorker storePendingChunk anchor: expected 1 match, got {data.count(store_anchor)}")
+
+guard_code = """    private boolean warext$drainOnePendingWrite() {
+        final var entry = this.pendingWrites.pollFirstEntry();
+        if (entry == null) {
+            return false;
+        }
+        this.runStore(entry.getKey(), entry.getValue());
+        return true;
+    }
+
+    private void warext$drainPendingWritePressure() {
+        if (!org.dreeam.leaf.config.modules.opt.ChunkIoPendingWriteLimit.enabled) {
+            return;
+        }
+
+        final int size = this.pendingWrites.size();
+        final int soft = org.dreeam.leaf.config.modules.opt.ChunkIoPendingWriteLimit.softLimit;
+        if (size < soft) {
+            return;
+        }
+
+        final int hard = org.dreeam.leaf.config.modules.opt.ChunkIoPendingWriteLimit.hardLimit;
+        final int maxBurst = org.dreeam.leaf.config.modules.opt.ChunkIoPendingWriteLimit.maxExtraDrainsPerTurn;
+
+        int extraDrains;
+        if (size >= hard) {
+            extraDrains = maxBurst;
+        } else {
+            final int pressure = Math.max(1, size - soft);
+            final int span = Math.max(1, hard - soft);
+            extraDrains = 1 + (pressure * Math.max(0, maxBurst - 1) / span);
+            extraDrains = Math.min(maxBurst, extraDrains);
+        }
+
+        for (int i = 0; i < extraDrains; ++i) {
+            if (!this.warext$drainOnePendingWrite()) {
+                break;
+            }
+        }
+    }
+
+    private void storePendingChunk() {
+        this.warext$drainPendingWritePressure();
+        Entry<ChunkPos, IOWorker.PendingStore> entry = this.pendingWrites.pollFirstEntry();"""
+
+data = data.replace(store_anchor, guard_code, 1)
+write(io_worker, data)
+print("[ok] bounded chunk NBT pending-write pressure guard")
+
+print("Stage 25: pregeneration chunk I/O queue pressure control applied.")
+
+
 # 35) Product-facing Warext Server Engine branding.
 # Keep upstream package/class names where compatibility requires them, but do not expose the
 # upstream project name as the product identity in runtime brand, commands, config headers,
