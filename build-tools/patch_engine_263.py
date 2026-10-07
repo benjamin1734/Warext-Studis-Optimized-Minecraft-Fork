@@ -3932,6 +3932,417 @@ print("[ok] AsyncPathProcessor callback API removal")
 print("Stage 22: async path completion allocation reduction applied.")
 
 
+
+
+# 36) Deferred container item decoding (opt-in).
+# Ported from Leaf PR #928. Original patch by HaHaWTH <102713261+HaHaWTH@users.noreply.github.com>.
+# Keep disabled by default: when enabled, raw Items NBT for chests/barrels/shulker boxes is retained
+# and decoded only when inventory contents are actually accessed.
+container_config = """package org.dreeam.leaf.config.modules.opt;
+
+import org.dreeam.leaf.config.ConfigCategory;
+import org.dreeam.leaf.config.ConfigModule;
+import org.dreeam.leaf.config.annotations.Experimental;
+
+public class ContainerItemLazyLoading extends ConfigModule {
+    public String basePath() {
+        return ConfigCategory.PERF.basePath();
+    }
+
+    @Experimental
+    public static boolean lazyContainerItemLoading = false;
+
+    @Override
+    public void onLoaded() {
+        lazyContainerItemLoading = globalConfig.getBoolean(
+            basePath() + ".container-item-lazy-loading",
+            lazyContainerItemLoading,
+            globalConfig.pickStringRegionBased(
+                """
+                Experimental: defer item decoding in chests, trapped chests, barrels and shulker boxes until inventory access.
+                Raw item NBT is retained until first access, which trades lower chunk-load decode cost for temporary memory retention.
+                """,
+                """
+                实验性功能: 箱子、陷阱箱、木桶和潜影盒延迟到首次访问时解码物品。
+                首次访问前会保留原始物品 NBT，以临时内存占用换取更低的区块加载解码开销。
+                """
+            )
+        );
+    }
+}
+"""
+write("leaf-server/src/main/java/org/dreeam/leaf/config/modules/opt/ContainerItemLazyLoading.java", container_config)
+print("[ok] opt-in deferred container config")
+
+tag_input = "leaf-server/src/minecraft/java/net/minecraft/world/level/storage/TagValueInput.java"
+data = read(tag_input)
+tag_anchor = """    // Paper start - utility methods"""
+if data.count(tag_anchor) != 1:
+    raise RuntimeError(f"TagValueInput utility anchor: expected 1 match, got {data.count(tag_anchor)}")
+tag_helpers = """    // Warext start - deferred container item decoding
+    public TagValueInput warext$withProblemReporter(final net.minecraft.util.ProblemReporter problemReporter) {
+        return new TagValueInput(problemReporter, this.context, this.input);
+    }
+
+    public boolean warext$hasField(final String name) {
+        return this.input.get(name) != null;
+    }
+
+    public TagValueInput warext$retainField(final String name) {
+        final net.minecraft.nbt.CompoundTag retained = new net.minecraft.nbt.CompoundTag();
+        final net.minecraft.nbt.Tag value = this.input.get(name);
+        if (value != null) {
+            retained.put(name, value);
+        }
+        return new TagValueInput(net.minecraft.util.ProblemReporter.DISCARDING, this.context, retained);
+    }
+
+    public void warext$copyFieldTo(final String name, final ValueOutput output) {
+        final net.minecraft.nbt.Tag source = this.input.get(name);
+        if (source == null) {
+            return;
+        }
+        final net.minecraft.nbt.Tag value = source.copy();
+        if (output instanceof TagValueOutput tagOutput) {
+            tagOutput.buildResult().put(name, value);
+        } else {
+            output.store(
+                name,
+                com.mojang.serialization.Codec.PASSTHROUGH,
+                new com.mojang.serialization.Dynamic<>(net.minecraft.nbt.NbtOps.INSTANCE, value)
+            );
+        }
+    }
+    // Warext end - deferred container item decoding
+
+"""
+data = data.replace(tag_anchor, tag_helpers + tag_anchor, 1)
+write(tag_input, data)
+print("[ok] TagValueInput retained-field support")
+
+container_helper = "leaf-server/src/minecraft/java/net/minecraft/world/ContainerHelper.java"
+data = read(container_helper)
+helper_anchor = """    public static int clearOrCountMatchingItems("""
+if data.count(helper_anchor) != 1:
+    raise RuntimeError(f"ContainerHelper insertion anchor: expected 1 match, got {data.count(helper_anchor)}")
+pending_code = """    // Warext start - deferred container item decoding
+    // Original optimization by HaHaWTH, adapted for Warext Server Engine 26.3.
+    public static @org.jspecify.annotations.Nullable PendingItems warext$loadAllItemsDeferred(
+        final ValueInput input,
+        final NonNullList<ItemStack> itemStacks
+    ) {
+        if (org.dreeam.leaf.config.modules.opt.ContainerItemLazyLoading.lazyContainerItemLoading
+            && input instanceof net.minecraft.world.level.storage.TagValueInput tagInput
+            && tagInput.warext$hasField(TAG_ITEMS)) {
+            return new PendingItems(tagInput);
+        }
+        loadAllItems(input, itemStacks);
+        return null;
+    }
+
+    public static final class PendingItems {
+        private static final org.slf4j.Logger LOGGER = com.mojang.logging.LogUtils.getLogger();
+        private final net.minecraft.world.level.storage.TagValueInput input;
+
+        private PendingItems(final net.minecraft.world.level.storage.TagValueInput input) {
+            this.input = input.warext$retainField(TAG_ITEMS);
+        }
+
+        public void load(
+            final NonNullList<ItemStack> itemStacks,
+            final net.minecraft.util.ProblemReporter.PathElement path
+        ) {
+            try (net.minecraft.util.ProblemReporter.ScopedCollector reporter =
+                     new net.minecraft.util.ProblemReporter.ScopedCollector(path, LOGGER)) {
+                loadAllItems(this.input.warext$withProblemReporter(reporter), itemStacks);
+            }
+        }
+
+        public void save(final ValueOutput output) {
+            this.input.warext$copyFieldTo(TAG_ITEMS, output);
+        }
+    }
+    // Warext end - deferred container item decoding
+
+"""
+data = data.replace(helper_anchor, pending_code + helper_anchor, 1)
+write(container_helper, data)
+print("[ok] deferred ContainerHelper item decode")
+
+lithium_inventory = "leaf-server/src/main/java/net/caffeinemc/mods/lithium/api/inventory/LithiumInventory.java"
+data = read(lithium_inventory)
+li_anchor = """    NonNullList<ItemStack> getInventoryLithium();
+
+    /**
+     * Setter for the inventory stack list of this inventory."""
+if data.count(li_anchor) != 1:
+    raise RuntimeError(f"LithiumInventory getter anchor: expected 1 match, got {data.count(li_anchor)}")
+li_new = """    NonNullList<ItemStack> getInventoryLithium();
+
+    /**
+     * Returns the backing stack list without forcing deferred item NBT to decode.
+     * Cache invalidation paths may use this; actual inventory access must use getInventoryLithium().
+     */
+    default NonNullList<ItemStack> getInventoryLithiumWithoutLoading() {
+        return this.getInventoryLithium();
+    }
+
+    /**
+     * Setter for the inventory stack list of this inventory."""
+data = data.replace(li_anchor, li_new, 1)
+write(lithium_inventory, data)
+print("[ok] Lithium raw inventory accessor")
+
+inventory_helper = "leaf-server/src/main/java/net/caffeinemc/mods/lithium/common/hopper/InventoryHelper.java"
+replace_once(
+    inventory_helper,
+    """    public static LithiumStackList getLithiumStackListOrNull(LithiumInventory inventory) {
+        NonNullList<ItemStack> stackList = inventory.getInventoryLithium();""",
+    """    public static LithiumStackList getLithiumStackListOrNull(LithiumInventory inventory) {
+        NonNullList<ItemStack> stackList = inventory.getInventoryLithiumWithoutLoading();""",
+    "Lithium cache probe without deferred decode",
+)
+
+# Chest
+chest = "leaf-server/src/minecraft/java/net/minecraft/world/level/block/entity/ChestBlockEntity.java"
+data = read(chest)
+replace_pairs = [
+    (
+        """    private NonNullList<ItemStack> items = NonNullList.withSize(27, ItemStack.EMPTY);""",
+        """    private NonNullList<ItemStack> items = NonNullList.withSize(27, ItemStack.EMPTY);
+    private ContainerHelper.@org.jspecify.annotations.Nullable PendingItems warext$pendingItems;""",
+        "chest pending field",
+    ),
+    (
+        """    public java.util.List<net.minecraft.world.item.ItemStack> getContents() {
+        return this.items;
+    }""",
+        """    public java.util.List<net.minecraft.world.item.ItemStack> getContents() {
+        return this.getItems();
+    }""",
+        "chest contents force decode",
+    ),
+    (
+        """        this.items = NonNullList.withSize(this.getContainerSize(), ItemStack.EMPTY);
+        if (!this.tryLoadLootTable(input)) {
+            ContainerHelper.loadAllItems(input, this.items);
+        }""",
+        """        this.items = NonNullList.withSize(this.getContainerSize(), ItemStack.EMPTY);
+        this.warext$pendingItems = this.tryLoadLootTable(input)
+            ? null
+            : ContainerHelper.warext$loadAllItemsDeferred(input, this.items);""",
+        "chest deferred load",
+    ),
+    (
+        """        if (!this.trySaveLootTable(output)) {
+            ContainerHelper.saveAllItems(output, this.items);
+        }""",
+        """        if (!this.trySaveLootTable(output)) {
+            if (this.warext$pendingItems != null) {
+                this.warext$pendingItems.save(output);
+            } else {
+                ContainerHelper.saveAllItems(output, this.items);
+            }
+        }""",
+        "chest raw save",
+    ),
+    (
+        """    protected NonNullList<ItemStack> getItems() {
+        return this.items;
+    }""",
+        """    protected NonNullList<ItemStack> getItems() {
+        if (this.warext$pendingItems != null) {
+            this.warext$pendingItems.load(this.items, this.problemPath());
+            this.warext$pendingItems = null;
+        }
+        return this.items;
+    }""",
+        "chest first-access decode",
+    ),
+    (
+        """    public net.minecraft.core.NonNullList<net.minecraft.world.item.ItemStack> getInventoryLithium() {
+        return items;
+    }""",
+        """    public net.minecraft.core.NonNullList<net.minecraft.world.item.ItemStack> getInventoryLithium() {
+        return this.getItems();
+    }
+
+    @Override
+    public NonNullList<ItemStack> getInventoryLithiumWithoutLoading() {
+        return this.items;
+    }""",
+        "chest Lithium deferred access",
+    ),
+]
+for old,new,label in replace_pairs:
+    if data.count(old) != 1:
+        raise RuntimeError(f"{label}: expected 1 match, got {data.count(old)}")
+    data = data.replace(old,new,1)
+write(chest,data)
+print("[ok] chest deferred item decoding")
+
+# Barrel
+barrel = "leaf-server/src/minecraft/java/net/minecraft/world/level/block/entity/BarrelBlockEntity.java"
+data = read(barrel)
+barrel_field_anchor = """    public final ContainerOpenersCounter openersCounter = new ContainerOpenersCounter() {"""
+if data.count(barrel_field_anchor) != 1:
+    raise RuntimeError(f"barrel pending field anchor: expected 1 match, got {data.count(barrel_field_anchor)}")
+data = data.replace(
+    barrel_field_anchor,
+    """    private ContainerHelper.@org.jspecify.annotations.Nullable PendingItems warext$pendingItems;
+    public final ContainerOpenersCounter openersCounter = new ContainerOpenersCounter() {""",
+    1,
+)
+barrel_pairs = [
+    (
+        """    public java.util.List<ItemStack> getContents() {
+        return this.items;
+    }""",
+        """    public java.util.List<ItemStack> getContents() {
+        return this.getItems();
+    }""",
+        "barrel contents force decode",
+    ),
+    (
+        """        if (!this.trySaveLootTable(output)) {
+            ContainerHelper.saveAllItems(output, this.items);
+        }""",
+        """        if (!this.trySaveLootTable(output)) {
+            if (this.warext$pendingItems != null) {
+                this.warext$pendingItems.save(output);
+            } else {
+                ContainerHelper.saveAllItems(output, this.items);
+            }
+        }""",
+        "barrel raw save",
+    ),
+    (
+        """        this.items = NonNullList.withSize(this.getContainerSize(), ItemStack.EMPTY);
+        if (!this.tryLoadLootTable(input)) {
+            ContainerHelper.loadAllItems(input, this.items);
+        }""",
+        """        this.items = NonNullList.withSize(this.getContainerSize(), ItemStack.EMPTY);
+        this.warext$pendingItems = this.tryLoadLootTable(input)
+            ? null
+            : ContainerHelper.warext$loadAllItemsDeferred(input, this.items);""",
+        "barrel deferred load",
+    ),
+    (
+        """    protected NonNullList<ItemStack> getItems() {
+        return this.items;
+    }""",
+        """    protected NonNullList<ItemStack> getItems() {
+        if (this.warext$pendingItems != null) {
+            this.warext$pendingItems.load(this.items, this.problemPath());
+            this.warext$pendingItems = null;
+        }
+        return this.items;
+    }""",
+        "barrel first-access decode",
+    ),
+    (
+        """    public net.minecraft.core.NonNullList<net.minecraft.world.item.ItemStack> getInventoryLithium() {
+        return items;
+    }""",
+        """    public net.minecraft.core.NonNullList<net.minecraft.world.item.ItemStack> getInventoryLithium() {
+        return this.getItems();
+    }
+
+    @Override
+    public NonNullList<ItemStack> getInventoryLithiumWithoutLoading() {
+        return this.items;
+    }""",
+        "barrel Lithium deferred access",
+    ),
+]
+for old,new,label in barrel_pairs:
+    if data.count(old) != 1:
+        raise RuntimeError(f"{label}: expected 1 match, got {data.count(old)}")
+    data = data.replace(old,new,1)
+write(barrel,data)
+print("[ok] barrel deferred item decoding")
+
+# Shulker box
+shulker = "leaf-server/src/minecraft/java/net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity.java"
+data = read(shulker)
+shulker_pairs = [
+    (
+        """    private NonNullList<ItemStack> itemStacks = NonNullList.withSize(27, ItemStack.EMPTY);""",
+        """    private NonNullList<ItemStack> itemStacks = NonNullList.withSize(27, ItemStack.EMPTY);
+    private ContainerHelper.@Nullable PendingItems warext$pendingItems;""",
+        "shulker pending field",
+    ),
+    (
+        """    public List<ItemStack> getContents() {
+        return this.itemStacks;
+    }""",
+        """    public List<ItemStack> getContents() {
+        return this.getItems();
+    }""",
+        "shulker contents force decode",
+    ),
+    (
+        """        if (!this.trySaveLootTable(output)) {
+            ContainerHelper.saveAllItems(output, this.itemStacks, false);
+        }""",
+        """        if (!this.trySaveLootTable(output)) {
+            if (this.warext$pendingItems != null) {
+                this.warext$pendingItems.save(output);
+            } else {
+                ContainerHelper.saveAllItems(output, this.itemStacks, false);
+            }
+        }""",
+        "shulker raw save",
+    ),
+    (
+        """        this.itemStacks = NonNullList.withSize(this.getContainerSize(), ItemStack.EMPTY);
+        if (!this.tryLoadLootTable(input)) {
+            ContainerHelper.loadAllItems(input, this.itemStacks);
+        }""",
+        """        this.itemStacks = NonNullList.withSize(this.getContainerSize(), ItemStack.EMPTY);
+        this.warext$pendingItems = this.tryLoadLootTable(input)
+            ? null
+            : ContainerHelper.warext$loadAllItemsDeferred(input, this.itemStacks);""",
+        "shulker deferred load",
+    ),
+    (
+        """    protected NonNullList<ItemStack> getItems() {
+        return this.itemStacks;
+    }""",
+        """    protected NonNullList<ItemStack> getItems() {
+        if (this.warext$pendingItems != null) {
+            this.warext$pendingItems.load(this.itemStacks, this.problemPath());
+            this.warext$pendingItems = null;
+        }
+        return this.itemStacks;
+    }""",
+        "shulker first-access decode",
+    ),
+    (
+        """    public net.minecraft.core.NonNullList<net.minecraft.world.item.ItemStack> getInventoryLithium() {
+        return itemStacks;
+    }""",
+        """    public net.minecraft.core.NonNullList<net.minecraft.world.item.ItemStack> getInventoryLithium() {
+        return this.getItems();
+    }
+
+    @Override
+    public NonNullList<ItemStack> getInventoryLithiumWithoutLoading() {
+        return this.itemStacks;
+    }""",
+        "shulker Lithium deferred access",
+    ),
+]
+for old,new,label in shulker_pairs:
+    if data.count(old) != 1:
+        raise RuntimeError(f"{label}: expected 1 match, got {data.count(old)}")
+    data = data.replace(old,new,1)
+write(shulker,data)
+print("[ok] shulker deferred item decoding")
+
+print("Stage 23: opt-in deferred container item decoding applied.")
+
+
 # 35) Product-facing Warext Server Engine branding.
 # Keep upstream package/class names where compatibility requires them, but do not expose the
 # upstream project name as the product identity in runtime brand, commands, config headers,
