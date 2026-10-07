@@ -263,6 +263,13 @@ jobs:
               exit 1
             }
 
+            grep -A5 "compact-bit-storage:" config/warext-global.yml | grep -q "enabled: true" || {
+              echo "Compact bit storage optimization was not enabled"
+              grep -A8 -n "compact-bit-storage:" config/warext-global.yml || true
+              cat config/warext-global.yml
+              exit 1
+            }
+
             AQUA_SMOKE_START=$(wc -l < aquifer.log)
             echo "forceload add 512 512" >&6
             sleep 12
@@ -300,6 +307,48 @@ jobs:
             wait "$AQUA_PID" || true
             exec 6>&-
             grep "Done (" aquifer.log | tail -n 1
+
+            # Restart the same saved normal world so chunk-section palette deserialization
+            # exercises PalettedContainer.read() with compact-bit-storage enabled.
+            rm -f console.reload.pipe
+            mkfifo console.reload.pipe
+            exec 7<>console.reload.pipe
+            java -Dwarext.profile=pregeneration -Xms768M -Xmx1024M -jar server.jar nogui <console.reload.pipe >compact-reload.log 2>&1 &
+            RELOAD_PID=$!
+            for i in $(seq 1 120); do
+              grep -q "Done (" compact-reload.log && break
+              kill -0 "$RELOAD_PID" 2>/dev/null || { cat compact-reload.log; exit 1; }
+              sleep 1
+            done
+            grep -q "Done (" compact-reload.log || {
+              echo "Compact bit-storage reload smoke did not reach Done"
+              cat compact-reload.log
+              exit 1
+            }
+
+            echo "forceload add 512 512" >&7
+            sleep 6
+            echo "save-all flush" >&7
+            sleep 3
+            if grep -Eiq "Exception|Failed to load|Failed to save|palette.*error|bit.?storage.*error|chunk.*corrupt" compact-reload.log; then
+              echo "Compact bit-storage reload smoke emitted an error"
+              cat compact-reload.log
+              exit 1
+            fi
+            echo "forceload remove 512 512" >&7
+            echo "stop" >&7
+            for i in $(seq 1 30); do
+              kill -0 "$RELOAD_PID" 2>/dev/null || break
+              sleep 1
+            done
+            kill -0 "$RELOAD_PID" 2>/dev/null && {
+              cat compact-reload.log
+              kill "$RELOAD_PID" || true
+              exit 1
+            }
+            wait "$RELOAD_PID" || true
+            exec 7>&-
+            grep "Done (" compact-reload.log | tail -n 1
             cd ..
           }
 
