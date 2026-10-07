@@ -1,42 +1,45 @@
-# Warext Server Engine 26.3 exp.13
+# Warext Server Engine 26.3 exp.14
 
 Experimental high-performance server engine build for the 26.3 line.
 
-## Deferred container item decoding
-- Add an opt-in `performance.container-item-lazy-loading` module, disabled by default.
-- Defer decoding of raw `Items` NBT for chests, trapped chests, barrels and shulker boxes until inventory contents are actually accessed.
-- Preserve raw item NBT on save when a container was loaded but never opened/accessed, avoiding an unnecessary decode/re-encode cycle.
-- Retain only the raw `Items` field instead of the full block-entity NBT tree.
-- Lithium cache-invalidation probes can inspect the backing list without forcing deferred contents to decode.
-- Normal inventory access, Bukkit-facing `getContents()`, hopper/Lithium access and first mutation all force a real decode before use.
-- Feature remains experimental because it trades lower chunk-load decode cost for temporary retention of raw item NBT.
+## Chunky / world generation worker tuning
+- Add a dedicated `pregeneration` profile; aliases: `pregen`, `chunky`, and `worldgen`.
+- Replace Moonrise's automatic chunk-worker default with a Warext profile-aware policy when no explicit Paper worker count is configured.
+- On a detected 4-core/vCPU host:
+  - `balanced`: 2 chunk workers.
+  - `extreme`: 3 chunk workers.
+  - `pregeneration`: 3 chunk workers.
+  - `compatibility`: preserves the conservative Moonrise-style result.
+- The pregeneration profile disables default async pathfinding/tracker and AI activation optimizers that do not help offline Chunky generation, leaving more CPU headroom for chunk generation.
+- Larger hosts scale worker count conservatively according to profile and keep CPU reserve for the tick thread, GC, Netty, and I/O.
+- A manual Paper `worker-threads` value remains authoritative.
+- The existing brand-specific `WorkerThreadCount` system property remains authoritative.
+- Add an optional `-Dwarext.cpu.chunk-workers=N` override, clamped to 1-16 workers.
+- Startup now logs the selected Warext profile, detected core count, chunk worker count, and I/O worker count.
 
-Original optimization concept/patch: HaHaWTH, Leaf PR #928; adapted for Warext Server Engine 26.3 with raw-field presence checks and current Lithium/block-entity integration.
+The policy was developed after auditing Leaf PR #946 / C2ME-style worker-allocation ideas, but is implemented as a Warext-specific profile policy rather than wholesale-porting the closed PR.
 
 ## Validation
-- Balanced real-server smoke test.
-- Extreme real-server smoke test.
-- Dedicated deferred-container smoke test:
-  - generate Warext config and enable `container-item-lazy-loading`;
-  - create and save a chest with an item;
-  - restart with lazy loading enabled;
-  - verify the experimental module is active;
-  - access/mutate the loaded chest to force first-access decode;
-  - flush/save and stop cleanly without load/save errors.
+- Balanced real-server smoke boot.
+- Extreme real-server smoke boot.
+- Pregeneration/Chunky real-server smoke boot.
+- Each profile must initialize the Warext-aware Moonrise worker policy.
+- Deferred-container feature-enabled chest NBT restart/decode smoke from exp.13 remains enabled.
+- Runnable Paperclip JAR build and GitHub Release asset verification remain mandatory.
 
-## Existing performance/correctness layers retained
-- Async path one-time prepare/trim lifecycle and callback-allocation cleanup.
-- Brain.PATH, fallback-path, POI/HOME/nearest-bed and Paper Pathfinder API correctness.
-- Generator-scoped evaluator pools and mounted-mob malus semantics.
-- FastBitRadixSort entity-distance hot-path optimization.
-- ThreadLocal light-buffer retention cleanup.
-- Reusable tracker, collision, spawn/despawn and NBT serialization buffers.
+## Existing worldgen/chunk optimizations retained
+- Leaf 26.3 worldgen outward-iteration cache bypass (#935).
+- Chunk-cache p99-safe removal paths.
+- Chunk packet block-entity metadata pre-sizing.
+- Deferred chest/barrel/shulker item decoding, opt-in.
+- Precipitation current-chunk / heightmap / biome lookup reuse.
+- Adaptive async save/compression workers and NBT allocation reductions.
 
 ## Upstream base
 - Leaf 26.3 pinned at `0edc7f3b7d79b0e2e16a0ed1df8278c02c73537f`.
 
 ## Publishing
 - Publish `Warext-Server-Engine-26.3.jar`, `SHA256SUMS.txt`, and `UPSTREAM_COMMIT.txt` only after all smoke tests pass.
-- Fail the workflow if the GitHub Release does not contain the runnable `.jar`.
+- Fail the workflow if the release is missing the runnable `.jar`.
 
 This release remains a prerelease while the Leaf 26.3 line is still being stabilized.
