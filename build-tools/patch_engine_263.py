@@ -3938,7 +3938,7 @@ print("Stage 22: async path completion allocation reduction applied.")
 # Ported from Leaf PR #928. Original patch by HaHaWTH <102713261+HaHaWTH@users.noreply.github.com>.
 # Keep disabled by default: when enabled, raw Items NBT for chests/barrels/shulker boxes is retained
 # and decoded only when inventory contents are actually accessed.
-container_config = """package org.dreeam.leaf.config.modules.opt;
+container_config = '''package org.dreeam.leaf.config.modules.opt;
 
 import org.dreeam.leaf.config.ConfigCategory;
 import org.dreeam.leaf.config.ConfigModule;
@@ -3970,7 +3970,7 @@ public class ContainerItemLazyLoading extends ConfigModule {
         );
     }
 }
-"""
+'''
 write("leaf-server/src/main/java/org/dreeam/leaf/config/modules/opt/ContainerItemLazyLoading.java", container_config)
 print("[ok] opt-in deferred container config")
 
