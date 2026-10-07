@@ -4649,6 +4649,126 @@ print("[ok] bounded chunk NBT pending-write pressure guard")
 print("Stage 25: pregeneration chunk I/O queue pressure control applied.")
 
 
+
+
+# 39) Sampler-safe The End biome cache.
+# Inspired by C2ME / Leaf PR #946, but preserve vertical biome correctness and isolate cache
+# contents when the same biome source is queried with a different Climate.Sampler/world seed.
+end_cache_config = '''package org.dreeam.leaf.config.modules.opt;
+
+import org.dreeam.leaf.config.ConfigCategory;
+import org.dreeam.leaf.config.ConfigModule;
+
+public class TheEndBiomeCache extends ConfigModule {
+
+    public String basePath() {
+        return ConfigCategory.PERF.basePath() + ".worldgen.end-biome-cache";
+    }
+
+    public static boolean enabled =
+        org.dreeam.leaf.performance.WarextPerformanceProfile.isPregeneration();
+
+    public static int cacheCapacity = 2048;
+
+    @Override
+    public void onLoaded() {
+        enabled = globalConfig.getBoolean(basePath() + ".enabled", enabled);
+        cacheCapacity = Math.max(128, Math.min(16384, globalConfig.getInt(
+            basePath() + ".cache-capacity",
+            cacheCapacity
+        )));
+        globalConfig.addCommentRegionBased(
+            basePath(),
+            """
+            Caches The End biome lookups per worldgen thread.
+            Enabled by default only in the Warext pregeneration profile.
+            The Warext cache includes X/Y/Z in its key and is cleared when the climate sampler changes.
+            """,
+            """
+            按世界生成线程缓存末地生物群系查询。
+            默认仅在 Warext pregeneration 配置中启用。
+            Warext 缓存键包含 X/Y/Z，并在气候采样器变化时自动清空。
+            """
+        );
+    }
+}
+'''
+write("leaf-server/src/main/java/org/dreeam/leaf/config/modules/opt/TheEndBiomeCache.java", end_cache_config)
+print("[ok] pregeneration-aware End biome cache config")
+
+end_biome = "leaf-server/src/minecraft/java/net/minecraft/world/level/biome/TheEndBiomeSource.java"
+data = read(end_biome)
+
+resolver_anchor = """    @Override
+    public BiomeResolver createResolver(final Climate.Sampler sampler) {
+        return (quartX, quartY, quartZ) -> this.getNoiseBiome(quartX, quartY, quartZ, sampler);
+    }
+
+    private Holder<Biome> getNoiseBiome(final int quartX, final int quartY, final int quartZ, final Climate.Sampler sampler) {"""
+if data.count(resolver_anchor) != 1:
+    raise RuntimeError(f"TheEndBiomeSource resolver anchor: expected 1 match, got {data.count(resolver_anchor)}")
+
+cached_resolver = """    private final ThreadLocal<WarextEndBiomeCache> warext$biomeCache =
+        ThreadLocal.withInitial(WarextEndBiomeCache::new);
+
+    private static final class WarextEndBiomeCache {
+        private Climate.Sampler sampler;
+        private final it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap<Holder<Biome>> values =
+            new it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap<>();
+    }
+
+    private static long warext$packBiomeKey(final int quartX, final int quartY, final int quartZ) {
+        // Minecraft's horizontal world border fits comfortably in signed 25-bit quart coordinates.
+        // Reserve 14 bits for quart-Y so cache identity remains vertically correct.
+        return ((long)quartX & 0x1FFFFFFL) << 39
+            | ((long)quartZ & 0x1FFFFFFL) << 14
+            | ((long)quartY & 0x3FFFL);
+    }
+
+    @Override
+    public BiomeResolver createResolver(final Climate.Sampler sampler) {
+        return (quartX, quartY, quartZ) -> this.getNoiseBiome(quartX, quartY, quartZ, sampler);
+    }
+
+    private Holder<Biome> getNoiseBiome(final int quartX, final int quartY, final int quartZ, final Climate.Sampler sampler) {
+        if (!org.dreeam.leaf.config.modules.opt.TheEndBiomeCache.enabled) {
+            return this.warext$getVanillaNoiseBiome(quartX, quartY, quartZ, sampler);
+        }
+
+        final WarextEndBiomeCache cache = this.warext$biomeCache.get();
+        if (cache.sampler != sampler) {
+            cache.sampler = sampler;
+            cache.values.clear();
+        }
+
+        final long key = warext$packBiomeKey(quartX, quartY, quartZ);
+        final Holder<Biome> cached = cache.values.getAndMoveToLast(key);
+        if (cached != null) {
+            return cached;
+        }
+
+        final Holder<Biome> generated = this.warext$getVanillaNoiseBiome(quartX, quartY, quartZ, sampler);
+        cache.values.putAndMoveToLast(key, generated);
+
+        final int capacity = org.dreeam.leaf.config.modules.opt.TheEndBiomeCache.cacheCapacity;
+        while (cache.values.size() > capacity) {
+            cache.values.removeFirst();
+        }
+        return generated;
+    }
+
+    private Holder<Biome> warext$getVanillaNoiseBiome(final int quartX, final int quartY, final int quartZ, final Climate.Sampler sampler) {"""
+
+data = data.replace(resolver_anchor, cached_resolver, 1)
+
+# The original private method body now belongs to warext$getVanillaNoiseBiome; no other changes
+# are required because the replacement preserves the original opening brace/body.
+write(end_biome, data)
+print("[ok] sampler-safe The End biome cache")
+
+print("Stage 26: End worldgen biome lookup cache applied.")
+
+
 # 35) Product-facing Warext Server Engine branding.
 # Keep upstream package/class names where compatibility requires them, but do not expose the
 # upstream project name as the product identity in runtime brand, commands, config headers,
