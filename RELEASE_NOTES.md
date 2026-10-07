@@ -1,23 +1,23 @@
-# Warext Server Engine 26.3 exp.11
+# Warext Server Engine 26.3 exp.12
 
 Experimental high-performance server engine build for the 26.3 line.
 
-## 26.3-native async path correctness
-- Preserve mounted-mob pathfinding malus inheritance while keeping amphibious WALKABLE/WATER_BORDER costs local to each evaluator.
-- Avoid bypassing passenger/vehicle malus inheritance when an amphibious evaluator supplies its temporary path costs.
-- Keep all previous generator-scoped evaluator pooling and async lifecycle protections.
+## Async path completion allocation reduction
+- Remove the unused per-path post-processing callback list after Warext's one-time navigation prepare/trim lifecycle made it unnecessary.
+- Remove callback Consumer registration and callback-array copying during path completion.
+- Remove the dedicated completion lock object and publish completion through a single synchronized finalization path.
+- Keep `ready` volatile so completed path state is visible across worker/tick threads.
+- Remove `AsyncPathProcessor.awaitProcessing()` and its now-unused callback API.
+- Preserve idempotent path completion and all existing stale-target, Brain.PATH, fallback, POI and Paper API correctness fixes.
 
-## Entity-distance sorting
-- Raise the small-list insertion-sort threshold in `FastBitRadixSort`.
-- Skip radix recursion entirely for the common small entity lists.
-- Start radix traversal at the highest bit that actually differs across the active list.
-- Track differing bits independently for left/right partitions to avoid scanning identical high-order bit levels recursively.
-- Keep the existing reusable key buffer and allocation-free sort path.
+## Existing memory fixes retained
+- ThreadLocal sky/block light packet buffers are cleared after cloning, so chunk-light arrays are not retained by long-lived threads.
+- Reusable tracker, collision, spawn/despawn, NBT and pathfinding buffers remain enabled.
 
 ## Upstream review
 - Leaf `ver/26.3` still points to `0edc7f3b7d79b0e2e16a0ed1df8278c02c73537f`.
-- Compared Warext against 26.3-native Leaf PR #943; stale-target handling already existed in Warext and was not duplicated.
-- This release selectively carries only the non-duplicated, low-risk pieces relevant to correctness and hot-path sorting.
+- PR #940 light-buffer retention was already present in Warext and was not duplicated.
+- PR #928 deferred container item decoding was intentionally not included in this release because it changes NBT/Lithium/container lifecycle across multiple classes and should be isolated in a dedicated compatibility release.
 
 ## Validation / publishing
 - Build the runnable Paperclip server JAR.
