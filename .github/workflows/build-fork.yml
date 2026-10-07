@@ -137,6 +137,14 @@ jobs:
               }
             fi
 
+            PROFILE_UPPER=$(printf '%s' "$PROFILE" | tr '[:lower:]' '[:upper:]')
+            grep -q "Warext profile: $PROFILE_UPPER" server.log || {
+              echo "Profile-aware Moonrise chunk worker policy was not initialized for $PROFILE"
+              grep -n "worker threads" server.log || true
+              cat server.log
+              exit 1
+            }
+
             test -f config/warext-global.yml || {
               echo "Warext configuration file was not generated"
               find config -maxdepth 1 -type f -print || true
@@ -253,6 +261,7 @@ jobs:
 
           run_smoke balanced 25569
           run_smoke extreme 25570
+          run_smoke pregeneration 25571
           run_lazy_container_smoke
 
       - name: Remove legacy product-branded prereleases
