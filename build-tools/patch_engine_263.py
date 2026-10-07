@@ -4343,6 +4343,191 @@ print("[ok] shulker deferred item decoding")
 print("Stage 23: opt-in deferred container item decoding applied.")
 
 
+
+
+# 37) Pregeneration-aware Moonrise chunk worker policy.
+# The vanilla Moonrise heuristic can resolve to a single generation worker on a 4-vCPU host.
+# Warext keeps manual Paper worker-thread settings authoritative, but gives its profiles a
+# conservative CPU-aware default and adds a dedicated pregeneration/Chunky mode.
+profile_file = "leaf-server/src/main/java/org/dreeam/leaf/performance/WarextPerformanceProfile.java"
+replace_once(
+    profile_file,
+    """    public enum Mode {
+        COMPATIBILITY,
+        BALANCED,
+        EXTREME
+    }""",
+    """    public enum Mode {
+        COMPATIBILITY,
+        BALANCED,
+        EXTREME,
+        PREGENERATION
+    }""",
+    "pregeneration profile enum",
+)
+replace_once(
+    profile_file,
+    """            case "compat", "compatibility", "safe" -> Mode.COMPATIBILITY;
+            case "extreme", "max", "maximum" -> Mode.EXTREME;
+            default -> Mode.BALANCED;""",
+    """            case "compat", "compatibility", "safe" -> Mode.COMPATIBILITY;
+            case "extreme", "max", "maximum" -> Mode.EXTREME;
+            case "pregeneration", "pregen", "chunky", "worldgen" -> Mode.PREGENERATION;
+            default -> Mode.BALANCED;""",
+    "pregeneration profile parsing",
+)
+replace_once(
+    profile_file,
+    """    public static boolean isExtreme() {
+        return MODE == Mode.EXTREME;
+    }
+
+    public static boolean dynamicBrainDefault() {
+        return MODE != Mode.COMPATIBILITY;
+    }
+
+    public static boolean entityActivationOptimizerDefault() {
+        return MODE != Mode.COMPATIBILITY;
+    }
+
+    public static boolean asyncPathfindingDefault() {
+        return MODE != Mode.COMPATIBILITY && Runtime.getRuntime().availableProcessors() >= 4;
+    }
+
+    public static boolean asyncTrackerDefault() {
+        return MODE == Mode.EXTREME && Runtime.getRuntime().availableProcessors() >= 4;
+    }
+
+    public static int trackerMinEntitiesPerTask() {
+        return MODE == Mode.EXTREME ? 32 : 64;
+    }""",
+    """    public static boolean isExtreme() {
+        return MODE == Mode.EXTREME;
+    }
+
+    public static boolean isPregeneration() {
+        return MODE == Mode.PREGENERATION;
+    }
+
+    public static boolean dynamicBrainDefault() {
+        return MODE != Mode.COMPATIBILITY && MODE != Mode.PREGENERATION;
+    }
+
+    public static boolean entityActivationOptimizerDefault() {
+        return MODE != Mode.COMPATIBILITY && MODE != Mode.PREGENERATION;
+    }
+
+    public static boolean asyncPathfindingDefault() {
+        return MODE != Mode.COMPATIBILITY
+            && MODE != Mode.PREGENERATION
+            && Runtime.getRuntime().availableProcessors() >= 4;
+    }
+
+    public static boolean asyncTrackerDefault() {
+        return MODE == Mode.EXTREME && Runtime.getRuntime().availableProcessors() >= 4;
+    }
+
+    public static int trackerMinEntitiesPerTask() {
+        return MODE == Mode.EXTREME ? 32 : 64;
+    }
+
+    public static int chunkWorkerThreads(final int detectedCores) {
+        final int override = Integer.getInteger("warext.cpu.chunk-workers", 0);
+        if (override > 0) {
+            return Math.max(1, Math.min(16, override));
+        }
+
+        final int cores = Math.max(1, detectedCores);
+        if (MODE == Mode.COMPATIBILITY) {
+            int workers = cores / 2;
+            if (workers <= 4) {
+                workers = workers <= 3 ? 1 : 2;
+            } else {
+                workers /= 2;
+            }
+            return Math.max(1, workers);
+        }
+
+        if (cores <= 2) {
+            return 1;
+        }
+        if (cores <= 4) {
+            return MODE == Mode.BALANCED ? 2 : 3;
+        }
+        if (cores <= 6) {
+            return MODE == Mode.BALANCED ? 3 : 4;
+        }
+        if (cores <= 8) {
+            return MODE == Mode.BALANCED ? 4 : (MODE == Mode.PREGENERATION ? 6 : 5);
+        }
+
+        final int reserved = MODE == Mode.PREGENERATION
+            ? 1
+            : (cores >= 24 ? 5 : (cores >= 16 ? 4 : 2));
+        final int usable = Math.max(2, cores - reserved);
+        final int numerator = MODE == Mode.BALANCED ? 55 : (MODE == Mode.PREGENERATION ? 80 : 70);
+        return Math.max(2, Math.min(16, (usable * numerator + 99) / 100));
+    }""",
+    "profile-aware chunk worker budget",
+)
+
+moonrise_candidates = [
+    "paper-server/src/main/java/ca/spottedleaf/moonrise/common/util/MoonriseCommon.java",
+    "leaf-server/src/main/java/ca/spottedleaf/moonrise/common/util/MoonriseCommon.java",
+]
+moonrise_common = next((candidate for candidate in moonrise_candidates if (root / candidate).is_file()), None)
+if moonrise_common is None:
+    raise RuntimeError("Generated MoonriseCommon.java was not found")
+
+replace_once(
+    moonrise_common,
+    """        int defaultWorkerThreads = OSNuma.getNativeInstance().getTotalCores()  / 2;
+        if (defaultWorkerThreads <= 4) {
+            defaultWorkerThreads = defaultWorkerThreads <= 3 ? 1 : 2;
+        } else {
+            defaultWorkerThreads = defaultWorkerThreads / 2;
+        }
+        defaultWorkerThreads = Integer.getInteger(PlatformHooks.get().getBrand() + ".WorkerThreadCount", Integer.valueOf(defaultWorkerThreads));
+
+        int workerThreads = configWorkerThreads;
+
+        if (workerThreads <= 0) {
+            workerThreads = defaultWorkerThreads;
+        }
+
+        final int ioThreads = Math.max(1, configIoThreads);""",
+    """        final int detectedCores = Math.max(1, OSNuma.getNativeInstance().getTotalCores());
+        final String workerProperty = PlatformHooks.get().getBrand() + ".WorkerThreadCount";
+        final Integer explicitWorkerProperty = Integer.getInteger(workerProperty);
+
+        int workerThreads = configWorkerThreads;
+        if (workerThreads <= 0) {
+            workerThreads = explicitWorkerProperty != null
+                ? Math.max(1, explicitWorkerProperty.intValue())
+                : org.dreeam.leaf.performance.WarextPerformanceProfile.chunkWorkerThreads(detectedCores);
+        }
+
+        final int ioThreads = Math.max(1, configIoThreads);""",
+    "Warext profile-aware Moonrise worker allocation",
+)
+replace_once(
+    moonrise_common,
+    """        LOGGER.info(PlatformHooks.get().getBrand() + " is using " + workerThreads + " worker threads, " + ioThreads + " I/O threads");""",
+    """        LOGGER.info(
+            "{} is using {} worker threads, {} I/O threads (Warext profile: {}, detected cores: {})",
+            PlatformHooks.get().getBrand(),
+            workerThreads,
+            ioThreads,
+            org.dreeam.leaf.performance.WarextPerformanceProfile.mode(),
+            detectedCores
+        );""",
+    "Warext Moonrise worker policy logging",
+)
+
+print("[ok] pregeneration-aware Moonrise chunk worker policy")
+print("Stage 24: 4-vCPU Chunky/worldgen worker allocation applied.")
+
+
 # 35) Product-facing Warext Server Engine branding.
 # Keep upstream package/class names where compatibility requires them, but do not expose the
 # upstream project name as the product identity in runtime brand, commands, config headers,
