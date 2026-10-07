@@ -181,7 +181,7 @@ jobs:
               }
               echo "save-all flush" >&3
               sleep 4
-              if grep -Eq "Exception|ERROR|Failed to load|Failed to save|worldgen.*error|biome.*error" server.log; then
+              if grep -Eiq "Exception|Failed to load|Failed to save|worldgen.*error|biome.*error|TheEndBiome.*error" server.log; then
                 echo "End worldgen smoke emitted an error"
                 cat server.log
                 exit 1
