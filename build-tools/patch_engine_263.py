@@ -2843,6 +2843,150 @@ print("[ok] Paper Pathfinder API async synchronization")
 
 print("Stage 18: synchronous Paper pathfinding API compatibility applied.")
 
+# 33) Preserve mounted-mob malus inheritance while keeping amphibious temporary costs local.
+mob_java = "leaf-server/src/minecraft/java/net/minecraft/world/entity/Mob.java"
+data = read(mob_java)
+malus_anchor = """        return malus == null ? pathType.getMalus() : malus;
+    }
+
+    public void setPathfindingMalus(final PathType pathType, final float cost) {"""
+malus_replacement = """        return malus == null ? pathType.getMalus() : malus;
+    }
+
+    public float warext$getPathfindingMalusWithOverride(final PathType pathType, final float ownMalus) {
+        if (this.getControlledVehicle() instanceof Mob riding && riding.shouldPassengersInheritMalus()) {
+            Float malus = riding.pathfindingMalus.get(pathType);
+            return malus == null ? pathType.getMalus() : malus;
+        }
+        return ownMalus;
+    }
+
+    public void setPathfindingMalus(final PathType pathType, final float cost) {"""
+if data.count(malus_anchor) != 1:
+    raise RuntimeError(f"Mob malus override anchor: expected 1 match, got {data.count(malus_anchor)}")
+data = data.replace(malus_anchor, malus_replacement, 1)
+write(mob_java, data)
+print("[ok] mounted mob malus inheritance helper")
+
+# 34) FastBitRadixSort: avoid radix recursion for tiny lists and skip bit levels that are
+# identical across the active partition. This is especially useful for tracker/entity-distance
+# sorting where list sizes are frequently small.
+fast_sort = "leaf-server/src/main/java/org/dreeam/leaf/util/FastBitRadixSort.java"
+data = read(fast_sort)
+
+if data.count("private static final int SMALL_ARRAY_THRESHOLD = 6;") != 1:
+    raise RuntimeError("FastBitRadixSort threshold anchor mismatch")
+data = data.replace(
+    "private static final int SMALL_ARRAY_THRESHOLD = 6;",
+    "private static final int SMALL_ARRAY_THRESHOLD = 11;",
+    1,
+)
+
+old_sort_body = """        double tx = target.x();
+        double ty = target.y();
+        double tz = target.z();
+        for (int i = 0; i < size; i++) {
+            this.bitsBuffer[i] = Double.doubleToRawLongBits(((Entity) entities[i]).distanceToSqr(tx, ty, tz));
+        }
+
+        fastRadixSort(entities, this.bitsBuffer, 0, size - 1, 62);
+    }"""
+new_sort_body = """        double tx = target.x();
+        double ty = target.y();
+        double tz = target.z();
+        if (size - 1 <= SMALL_ARRAY_THRESHOLD) {
+            for (int i = 0; i < size; i++) {
+                this.bitsBuffer[i] = Double.doubleToRawLongBits(((Entity) entities[i]).distanceToSqr(tx, ty, tz));
+            }
+            insertionSort(entities, this.bitsBuffer, 0, size - 1);
+            return;
+        }
+
+        long orBits = 0L;
+        long andBits = -1L;
+        for (int i = 0; i < size; i++) {
+            long key = Double.doubleToRawLongBits(((Entity) entities[i]).distanceToSqr(tx, ty, tz));
+            this.bitsBuffer[i] = key;
+            orBits |= key;
+            andBits &= key;
+        }
+
+        fastRadixSort(entities, this.bitsBuffer, 0, size - 1, highestDifferingBit(orBits, andBits));
+    }
+
+    private static int highestDifferingBit(long orBits, long andBits) {
+        long differingBits = (orBits ^ andBits) & Long.MAX_VALUE;
+        return 63 - Long.numberOfLeadingZeros(differingBits);
+    }"""
+if data.count(old_sort_body) != 1:
+    raise RuntimeError(f"FastBitRadixSort sort body: expected 1 match, got {data.count(old_sort_body)}")
+data = data.replace(old_sort_body, new_sort_body, 1)
+
+old_partition = """        int i = low;
+        int j = high;
+        final long mask = 1L << bit;
+
+        while (i <= j) {
+            while (i <= j && (bits[i] & mask) == 0) {
+                i++;
+            }
+            while (i <= j && (bits[j] & mask) != 0) {
+                j--;
+            }
+            if (i < j) {
+                swap(ents, bits, i++, j--);
+            }
+        }
+
+        if (low < j) {
+            fastRadixSort(ents, bits, low, j, bit - 1);
+        }
+        if (i < high) {
+            fastRadixSort(ents, bits, i, high, bit - 1);
+        }"""
+new_partition = """        int i = low;
+        int j = high;
+        final long mask = 1L << bit;
+        long leftOrBits = 0L;
+        long leftAndBits = -1L;
+        long rightOrBits = 0L;
+        long rightAndBits = -1L;
+
+        while (i <= j) {
+            while (i <= j && (bits[i] & mask) == 0) {
+                leftOrBits |= bits[i];
+                leftAndBits &= bits[i];
+                i++;
+            }
+            while (i <= j && (bits[j] & mask) != 0) {
+                rightOrBits |= bits[j];
+                rightAndBits &= bits[j];
+                j--;
+            }
+            if (i < j) {
+                leftOrBits |= bits[j];
+                leftAndBits &= bits[j];
+                rightOrBits |= bits[i];
+                rightAndBits &= bits[i];
+                swap(ents, bits, i++, j--);
+            }
+        }
+
+        if (low < j) {
+            fastRadixSort(ents, bits, low, j, highestDifferingBit(leftOrBits, leftAndBits));
+        }
+        if (i < high) {
+            fastRadixSort(ents, bits, i, high, highestDifferingBit(rightOrBits, rightAndBits));
+        }"""
+if data.count(old_partition) != 1:
+    raise RuntimeError(f"FastBitRadixSort partition body: expected 1 match, got {data.count(old_partition)}")
+data = data.replace(old_partition, new_partition, 1)
+write(fast_sort, data)
+print("[ok] FastBitRadixSort differing-bit fast path")
+
+print("Stage 19: 26.3-native malus semantics and entity-distance sort optimization applied.")
+
+
 
 
 
@@ -2921,13 +3065,11 @@ if data.count(amph_anchor) != 1:
     raise RuntimeError(f"Amphibious getStart anchor: expected 1 match, got {data.count(amph_anchor)}")
 amph_helper = """    @Override
     protected float getPathfindingMalus(final Mob mob, final PathType pathType) {
-        if (mob == this.mob) {
-            if (pathType == PathType.WALKABLE) {
-                return 6.0F;
-            }
-            if (pathType == PathType.WATER_BORDER) {
-                return 4.0F;
-            }
+        if (pathType == PathType.WALKABLE) {
+            return mob.warext$getPathfindingMalusWithOverride(pathType, 6.0F);
+        }
+        if (pathType == PathType.WATER_BORDER) {
+            return mob.warext$getPathfindingMalusWithOverride(pathType, 4.0F);
         }
         return super.getPathfindingMalus(mob, pathType);
     }
