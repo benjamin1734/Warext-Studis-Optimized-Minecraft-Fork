@@ -4865,6 +4865,90 @@ print("[ok] Aquifer power-of-two fluid-cell division")
 print("Stage 27: Aquifer worldgen hot-path precompute applied.")
 
 
+
+
+# 41) Compact uniform PalettedContainer storage after deserialization.
+# Independently adapted from the ModernFix compact-bit-storage idea reviewed in Leaf PR #946.
+# If a section decodes to palette index 0 everywhere, keep the exact same logical values but
+# collapse the backing storage back to the uniform 0-bit representation.
+compact_config = '''package org.dreeam.leaf.config.modules.opt;
+
+import org.dreeam.leaf.config.ConfigCategory;
+import org.dreeam.leaf.config.ConfigModule;
+
+public class CompactBitStorage extends ConfigModule {
+
+    public String basePath() {
+        return ConfigCategory.PERF.basePath() + ".memory.compact-bit-storage";
+    }
+
+    public static boolean enabled = true;
+
+    @Override
+    public void onLoaded() {
+        globalConfig.addCommentRegionBased(
+            basePath(),
+            """
+            Compacts deserialized uniform chunk-section palettes back to the 0-bit representation.
+            This reduces memory retained by empty or single-value sections that arrived with excess bit storage.
+            Logical palette contents are unchanged.
+            """,
+            """
+            将反序列化后的单一值区块段调色板重新压缩为 0 位表示。
+            可减少空区块段或单一方块区块段因多余位存储产生的内存占用。
+            调色板逻辑内容不会改变。
+            """
+        );
+        enabled = globalConfig.getBoolean(basePath() + ".enabled", enabled);
+    }
+}
+'''
+write("leaf-server/src/main/java/org/dreeam/leaf/config/modules/opt/CompactBitStorage.java", compact_config)
+print("[ok] compact bit-storage config")
+
+paletted = "leaf-server/src/minecraft/java/net/minecraft/world/level/chunk/PalettedContainer.java"
+data = read(paletted)
+
+compact_anchor = """            newData.palette.read(buffer, this.strategy.globalMap());
+            buffer.readFixedSizeLongArray(newData.storage.getRaw());
+            this.data = newData;
+            this.updateData(this.data); // Paper - optimise palette reads"""
+compact_replacement = """            newData.palette.read(buffer, this.strategy.globalMap());
+            buffer.readFixedSizeLongArray(newData.storage.getRaw());
+            this.data = newData;
+
+            // Warext - compact uniform PalettedContainer storage
+            if (org.dreeam.leaf.config.modules.opt.CompactBitStorage.enabled && newBits > 1) {
+                final long[] rawStorage = this.data.storage.getRaw();
+                boolean allPaletteZero = rawStorage.length > 0;
+                for (final long word : rawStorage) {
+                    if (word != 0L) {
+                        allPaletteZero = false;
+                        break;
+                    }
+                }
+
+                if (allPaletteZero) {
+                    try {
+                        final T uniformValue = this.data.palette.valueFor(0);
+                        this.data = this.createOrReuseData(null, 0);
+                        this.data.palette.idFor(uniformValue, this);
+                    } catch (final RuntimeException ignored) {
+                        // Malformed/unknown palette data keeps the original decoded representation.
+                    }
+                }
+            }
+
+            this.updateData(this.data); // Paper - optimise palette reads"""
+if data.count(compact_anchor) != 1:
+    raise RuntimeError(f"PalettedContainer compact storage anchor: expected 1 match, got {data.count(compact_anchor)}")
+data = data.replace(compact_anchor, compact_replacement, 1)
+
+write(paletted, data)
+print("[ok] compact uniform PalettedContainer storage")
+print("Stage 28: chunk-section compact bit-storage optimization applied.")
+
+
 # 35) Product-facing Warext Server Engine branding.
 # Keep upstream package/class names where compatibility requires them, but do not expose the
 # upstream project name as the product identity in runtime brand, commands, config headers,
