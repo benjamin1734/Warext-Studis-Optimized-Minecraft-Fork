@@ -218,6 +218,91 @@ jobs:
             cd ..
           }
 
+          run_aquifer_worldgen_smoke() {
+            DIR="smoke-aquifer"
+            rm -rf "$DIR"
+            mkdir -p "$DIR"
+            cp artifacts/Warext-Server-Engine-26.3.jar "$DIR/server.jar"
+            cd "$DIR"
+
+            printf 'eula=true\n' > eula.txt
+            cat > server.properties <<EOF
+online-mode=false
+server-port=25572
+level-seed=8675309
+level-type=minecraft:normal
+view-distance=2
+simulation-distance=2
+spawn-protection=0
+max-players=1
+enable-query=false
+enable-rcon=false
+EOF
+
+            mkfifo console.aquifer.pipe
+            exec 6<>console.aquifer.pipe
+            java -Dwarext.profile=pregeneration -Xms768M -Xmx1024M -jar server.jar nogui <console.aquifer.pipe >aquifer.log 2>&1 &
+            AQUA_PID=$!
+
+            for i in $(seq 1 120); do
+              grep -q "Done (" aquifer.log && break
+              kill -0 "$AQUA_PID" 2>/dev/null || { cat aquifer.log; exit 1; }
+              sleep 1
+            done
+            grep -q "Done (" aquifer.log || {
+              echo "Aquifer worldgen smoke did not reach Done"
+              cat aquifer.log
+              exit 1
+            }
+
+            test -f config/warext-global.yml
+            grep -A5 "aquifer-center-precompute:" config/warext-global.yml | grep -q "enabled: true" || {
+              echo "Pregeneration profile did not enable Aquifer center precompute"
+              grep -A8 -n "aquifer-center-precompute:" config/warext-global.yml || true
+              cat config/warext-global.yml
+              exit 1
+            }
+
+            AQUA_SMOKE_START=$(wc -l < aquifer.log)
+            echo "forceload add 512 512" >&6
+            sleep 12
+            kill -0 "$AQUA_PID" 2>/dev/null || {
+              echo "Server exited during Aquifer worldgen smoke"
+              cat aquifer.log
+              exit 1
+            }
+            echo "save-all flush" >&6
+            sleep 4
+
+            tail -n "+$((AQUA_SMOKE_START + 1))" aquifer.log > aquifer-worldgen-smoke.log
+            grep -Fq "Marked chunk [32, 32] in minecraft:overworld to be force loaded" aquifer-worldgen-smoke.log || {
+              echo "Aquifer worldgen smoke did not force-load the expected chunk"
+              cat aquifer-worldgen-smoke.log
+              exit 1
+            }
+            if grep -Eiq "Exception|Failed to load|Failed to save|aquifer.*error|worldgen.*error" aquifer-worldgen-smoke.log; then
+              echo "Aquifer worldgen smoke emitted an error"
+              cat aquifer-worldgen-smoke.log
+              exit 1
+            fi
+
+            echo "forceload remove 512 512" >&6
+            echo "stop" >&6
+            for i in $(seq 1 30); do
+              kill -0 "$AQUA_PID" 2>/dev/null || break
+              sleep 1
+            done
+            kill -0 "$AQUA_PID" 2>/dev/null && {
+              cat aquifer.log
+              kill "$AQUA_PID" || true
+              exit 1
+            }
+            wait "$AQUA_PID" || true
+            exec 6>&-
+            grep "Done (" aquifer.log | tail -n 1
+            cd ..
+          }
+
           run_lazy_container_smoke() {
             DIR="smoke-balanced"
             cd "$DIR"
@@ -296,6 +381,7 @@ jobs:
           run_smoke balanced 25569
           run_smoke extreme 25570
           run_smoke pregeneration 25571
+          run_aquifer_worldgen_smoke
           run_lazy_container_smoke
 
       - name: Remove legacy product-branded prereleases
