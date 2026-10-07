@@ -4769,6 +4769,102 @@ print("[ok] sampler-safe The End biome cache")
 print("Stage 26: End worldgen biome lookup cache applied.")
 
 
+
+
+# 40) Vanilla-equivalent Aquifer center precompute.
+# Do not port the full C2ME Aquifer algorithm here: preserve vanilla's closest-center search,
+# pressure calculation, fluid scheduling and positional RNG implementation. The optimization only
+# moves the exact same per-grid positional random sampling from the block hot path into the
+# NoiseBasedAquifer constructor when pregeneration mode is active.
+aquifer_config = '''package org.dreeam.leaf.config.modules.opt;
+
+import org.dreeam.leaf.config.ConfigCategory;
+import org.dreeam.leaf.config.ConfigModule;
+
+public class AquiferCenterPrecompute extends ConfigModule {
+
+    public String basePath() {
+        return ConfigCategory.PERF.basePath() + ".worldgen.aquifer-center-precompute";
+    }
+
+    public static boolean enabled =
+        org.dreeam.leaf.performance.WarextPerformanceProfile.isPregeneration();
+
+    @Override
+    public void onLoaded() {
+        enabled = globalConfig.getBoolean(basePath() + ".enabled", enabled);
+        globalConfig.addCommentRegionBased(
+            basePath(),
+            """
+            Precomputes vanilla aquifer sample centers once per aquifer instance instead of
+            lazily deriving positional RNG samples in the per-block substance hot path.
+            Enabled by default only in the Warext pregeneration profile.
+            This does not replace vanilla nearest-center, pressure, barrier or fluid logic.
+            """,
+            """
+            每个含水层实例预先计算原版含水层采样中心，避免在逐方块热点路径中
+            反复派生位置随机数。默认仅在 Warext pregeneration 配置中启用。
+            不替换原版最近中心、压力、屏障或流体判定逻辑。
+            """
+        );
+    }
+}
+'''
+write("leaf-server/src/main/java/org/dreeam/leaf/config/modules/opt/AquiferCenterPrecompute.java", aquifer_config)
+print("[ok] pregeneration-aware Aquifer center precompute config")
+
+aquifer = "leaf-server/src/minecraft/java/net/minecraft/world/level/levelgen/Aquifer.java"
+data = read(aquifer)
+
+precompute_anchor = """            this.aquiferCache = new Aquifer.FluidStatus[totalGridSize];
+            this.aquiferLocationCache = new long[totalGridSize];
+            Arrays.fill(this.aquiferLocationCache, Long.MAX_VALUE);
+            int maxAdjustedSurfaceLevel = this.adjustSurfaceLevel("""
+precompute_replacement = """            this.aquiferCache = new Aquifer.FluidStatus[totalGridSize];
+            this.aquiferLocationCache = new long[totalGridSize];
+            Arrays.fill(this.aquiferLocationCache, Long.MAX_VALUE);
+
+            // Warext - vanilla-equivalent Aquifer center precompute
+            if (org.dreeam.leaf.config.modules.opt.AquiferCenterPrecompute.enabled) {
+                for (int localY = 0; localY < gridSizeY; ++localY) {
+                    final int spacedGridY = localY + this.minGridY;
+                    for (int localZ = 0; localZ < this.gridSizeZ; ++localZ) {
+                        final int spacedGridZ = localZ + this.minGridZ;
+                        for (int localX = 0; localX < this.gridSizeX; ++localX) {
+                            final int spacedGridX = localX + this.minGridX;
+                            final RandomSource random = this.positionalRandomFactory.at(spacedGridX, spacedGridY, spacedGridZ);
+                            final int index = this.getIndex(spacedGridX, spacedGridY, spacedGridZ);
+                            this.aquiferLocationCache[index] = BlockPos.asLong(
+                                fromGridX(spacedGridX, random.nextInt(10)),
+                                fromGridY(spacedGridY, random.nextInt(9)),
+                                fromGridZ(spacedGridZ, random.nextInt(10))
+                            );
+                        }
+                    }
+                }
+            }
+
+            int maxAdjustedSurfaceLevel = this.adjustSurfaceLevel("""
+if data.count(precompute_anchor) != 1:
+    raise RuntimeError(f"Aquifer constructor precompute anchor: expected 1 match, got {data.count(precompute_anchor)}")
+data = data.replace(precompute_anchor, precompute_replacement, 1)
+
+# Power-of-two floor division is exactly equivalent to arithmetic right shift for signed ints.
+floor_x = "int fluidTypeCellX = Math.floorDiv(x, 64);"
+floor_z = "int fluidTypeCellZ = Math.floorDiv(z, 64);"
+if data.count(floor_x) != 1 or data.count(floor_z) != 1:
+    raise RuntimeError(
+        f"Aquifer power-of-two floorDiv anchors: x={data.count(floor_x)}, z={data.count(floor_z)}"
+    )
+data = data.replace(floor_x, "int fluidTypeCellX = x >> 6;", 1)
+data = data.replace(floor_z, "int fluidTypeCellZ = z >> 6;", 1)
+
+write(aquifer, data)
+print("[ok] vanilla-equivalent Aquifer center precompute")
+print("[ok] Aquifer power-of-two fluid-cell division")
+print("Stage 27: Aquifer worldgen hot-path precompute applied.")
+
+
 # 35) Product-facing Warext Server Engine branding.
 # Keep upstream package/class names where compatibility requires them, but do not expose the
 # upstream project name as the product identity in runtime brand, commands, config headers,
