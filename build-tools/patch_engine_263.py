@@ -3799,6 +3799,139 @@ replace_once(
 print("Stage 21: AI sensor hot-path allocation reuse applied.")
 
 
+
+
+# 35) AsyncPath callback infrastructure removal.
+# PathNavigation no longer uses AsyncPathProcessor.awaitProcessing after the Warext prepare/trim
+# lifecycle changes. Remove the per-path callback list, callback-array copy, Consumer allocation,
+# and dedicated completion lock. Completion remains idempotent and safely published.
+async_path = "leaf-server/src/main/java/org/dreeam/leaf/async/path/AsyncPath.java"
+data = read(async_path)
+
+for import_line in [
+    "import java.util.ArrayList;\n",
+    "import java.util.function.Consumer;\n",
+]:
+    if data.count(import_line) != 1:
+        raise RuntimeError(f"AsyncPath unused import cleanup: expected 1 match for {import_line!r}, got {data.count(import_line)}")
+    data = data.replace(import_line, "", 1)
+
+fields_old = """    private volatile boolean ready = false;
+    private final Object completionLock = new Object();
+
+    private final ArrayList<Consumer<Path>> postProcessing = new ArrayList<>();"""
+fields_new = """    private volatile boolean ready = false;"""
+if data.count(fields_old) != 1:
+    raise RuntimeError(f"AsyncPath callback fields: expected 1 match, got {data.count(fields_old)}")
+data = data.replace(fields_old, fields_new, 1)
+
+schedule_old = """    public void schedulePostProcessing(Consumer<Path> runnable) {
+        boolean invokeNow;
+        synchronized (this.completionLock) {
+            if (this.ready) {
+                invokeNow = true;
+            } else {
+                this.postProcessing.add(runnable);
+                invokeNow = false;
+            }
+        }
+        if (invokeNow) {
+            runnable.accept(this);
+        }
+    }
+
+"""
+if data.count(schedule_old) != 1:
+    raise RuntimeError(f"AsyncPath schedulePostProcessing: expected 1 match, got {data.count(schedule_old)}")
+data = data.replace(schedule_old, "", 1)
+
+complete_old = """    private void complete(Path bestPath) {
+        final Consumer<Path>[] callbacks;
+        synchronized (this.completionLock) {
+            if (this.ready) {
+                return;
+            }
+            this.nodes = bestPath.nodes;
+            this.target = bestPath.getTarget();
+            this.distToTarget = bestPath.getDistToTarget();
+            this.canReach = bestPath.canReach();
+            Path.DebugData debugData = bestPath.debugData();
+            if (debugData != null) {
+                this.setDebug(debugData.openSet(), debugData.closedSet(), debugData.targetNodes());
+            }
+            this.pathFn = null;
+            this.ready = true;
+            @SuppressWarnings("unchecked")
+            Consumer<Path>[] copied = this.postProcessing.toArray(new Consumer[0]);
+            callbacks = copied;
+            this.postProcessing.clear();
+        }
+        // Never invoke arbitrary navigation callbacks while holding the completion lock.
+        for (Consumer<Path> consumer : callbacks) {
+            consumer.accept(this);
+        }
+    }"""
+complete_new = """    private synchronized void complete(Path bestPath) {
+        if (this.ready) {
+            return;
+        }
+        this.nodes = bestPath.nodes;
+        this.target = bestPath.getTarget();
+        this.distToTarget = bestPath.getDistToTarget();
+        this.canReach = bestPath.canReach();
+        Path.DebugData debugData = bestPath.debugData();
+        if (debugData != null) {
+            this.setDebug(debugData.openSet(), debugData.closedSet(), debugData.targetNodes());
+        }
+        this.pathFn = null;
+        this.ready = true;
+    }"""
+if data.count(complete_old) != 1:
+    raise RuntimeError(f"AsyncPath completion body: expected 1 match, got {data.count(complete_old)}")
+data = data.replace(complete_old, complete_new, 1)
+write(async_path, data)
+print("[ok] AsyncPath callback infrastructure removal")
+
+processor = "leaf-server/src/main/java/org/dreeam/leaf/async/path/AsyncPathProcessor.java"
+data = read(processor)
+
+consumer_import = "import java.util.function.Consumer;\n"
+if data.count(consumer_import) != 1:
+    raise RuntimeError(f"AsyncPathProcessor Consumer import: expected 1 match, got {data.count(consumer_import)}")
+data = data.replace(consumer_import, "", 1)
+
+await_block = """    /**
+     * takes a possibly unprocessed path, and waits until it is completed
+     * the consumer will be immediately invoked if the path is already processed
+     * the consumer will always be called on the main thread
+     *
+     * @param path            a path to wait on
+     * @param afterProcessing a consumer to be called
+     */
+    public static void awaitProcessing(@Nullable Path path, Consumer<@Nullable Path> afterProcessing) {
+        if (path != null && !path.isProcessed() && path instanceof AsyncPath asyncPath) {
+            asyncPath.schedulePostProcessing(afterProcessing); // Reduce double lambda allocation
+        } else {
+            afterProcessing.accept(path);
+        }
+    }
+
+"""
+if data.count(await_block) != 1:
+    raise RuntimeError(f"AsyncPathProcessor awaitProcessing: expected 1 match, got {data.count(await_block)}")
+data = data.replace(await_block, "", 1)
+
+# Path is no longer referenced after awaitProcessing removal.
+path_import = "import net.minecraft.world.level.pathfinder.Path;\n"
+if data.count(path_import) == 1:
+    data = data.replace(path_import, "", 1)
+
+write(processor, data)
+print("[ok] AsyncPathProcessor callback API removal")
+
+print("Stage 22: async path completion allocation reduction applied.")
+
+
 # 35) Product-facing Warext Server Engine branding.
 # Keep upstream package/class names where compatibility requires them, but do not expose the
 # upstream project name as the product identity in runtime brand, commands, config headers,
