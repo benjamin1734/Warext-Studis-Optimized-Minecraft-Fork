@@ -1,35 +1,38 @@
-# Warext Server Engine 26.3 exp.17
+# Warext Server Engine 26.3 exp.18
 
 Experimental high-performance server engine build for the 26.3 line.
 
-## Vanilla-equivalent Aquifer center precompute
-- Add `performance.worldgen.aquifer-center-precompute.enabled`.
-- Enabled by default only in the Warext `pregeneration` / `pregen` / `chunky` / `worldgen` profile.
-- Precompute Aquifer sample-center locations once per `NoiseBasedAquifer` instance instead of lazily deriving the same positional RNG samples inside the per-block substance hot path.
-- Use vanilla `PositionalRandomFactory.at(x, y, z)` and the same `nextInt(10)`, `nextInt(9)`, `nextInt(10)` sequence for every grid cell.
-- Leave vanilla closest-four selection, distance ordering, pressure calculation, barrier noise, fluid-update scheduling and block-state decisions unchanged.
-- Do not expose or mutate random-generator internals and do not port the C2ME branchless nearest-center rewrite in this release.
-- Replace `Math.floorDiv(x, 64)` / `Math.floorDiv(z, 64)` with arithmetic shifts for the power-of-two fluid-type cells; this is mathematically equivalent for signed integer coordinates.
+## Compact uniform chunk-section bit storage
+- Add `performance.memory.compact-bit-storage.enabled`.
+- Enabled by default.
+- When a deserialized chunk section uses more than one palette bit but every stored palette index is zero, collapse it back to the uniform 0-bit representation.
+- Preserve the exact logical palette value at index 0.
+- Leave malformed or unknown palette data in its original decoded representation instead of forcing compaction.
+- Run Paper/Moonrise palette-read bookkeeping after any compaction so existing chunk read optimizations stay correct.
+- No biome, block, world-generation or chunk scheduling decisions are changed.
 
-## Why this is safer than the full C2ME Aquifer patch
-Leaf PR #946's Aquifer patch also rewrites positional RNG internals, pre-packs aquifer positions, replaces nearest-four selection and rewrites pressure math. Warext exp.17 deliberately takes only the center-precompute idea while preserving vanilla decision logic, so world-generation behavior stays tied to the same vanilla RNG calls and ordering.
+The optimization is independently adapted from the compact-bit-storage idea used by ModernFix and reviewed in Leaf PR #946.
+
+## Why this matters
+Empty or single-value chunk sections can otherwise retain unnecessary long-array bit storage after deserialization. On large pregenerated worlds this wastes heap and increases GC pressure even though every cell resolves to the same palette value.
 
 ## Validation
 - Balanced real-server smoke boot.
 - Extreme real-server smoke boot.
 - Pregeneration real-server smoke boot.
-- Pregeneration chunk-I/O guard and End-biome cache config validation.
-- Real distant End chunk generation smoke.
-- Dedicated normal-noise-world Aquifer smoke with fixed seed `8675309`.
-- Aquifer smoke must enable `aquifer-center-precompute`, force-load Overworld chunk `[32,32]`, save successfully and stop cleanly without Aquifer/worldgen errors.
+- Distant End worldgen smoke.
+- Normal noise-world Aquifer smoke with fixed seed `8675309`.
+- Saved Overworld chunk `[32,32]` is flushed to disk.
+- The same world is restarted and the saved chunk is force-loaded again, exercising real `PalettedContainer.read()` deserialization with compact-bit-storage enabled.
+- Reload must save and stop without palette, bit-storage, corruption or chunk-load errors.
 - Deferred-container chest NBT restart/decode smoke remains mandatory.
 - Runnable Paperclip JAR build and GitHub Release JAR verification remain mandatory.
 
 ## Existing pregeneration stack retained
-- 4-vCPU worker policy: Balanced 2, Extreme 3, Pregeneration 3.
-- Pregeneration disables default AI/path/tracker background work that does not help offline world generation.
+- 4-vCPU worker policy.
 - Bounded chunk NBT pending-write pressure control.
-- Sampler-safe, XYZ-aware The End biome cache.
+- XYZ/sampler-safe End biome cache.
+- Vanilla-equivalent Aquifer center precompute.
 - Deferred container item decoding remains opt-in.
 
 ## Upstream base
