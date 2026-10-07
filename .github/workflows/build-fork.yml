@@ -171,12 +171,89 @@ jobs:
             fi
 
             wait "$PID" || true
+            exec 3>&-
             grep "Done (" server.log | tail -n 1
+            cd ..
+          }
+
+          run_lazy_container_smoke() {
+            DIR="smoke-balanced"
+            cd "$DIR"
+
+            grep -q "container-item-lazy-loading: false" config/warext-global.yml || {
+              echo "Deferred container config option was not generated"
+              grep -n "container-item-lazy-loading" config/warext-global.yml || true
+              exit 1
+            }
+            sed -i 's/container-item-lazy-loading: false/container-item-lazy-loading: true/' config/warext-global.yml
+            grep -q "container-item-lazy-loading: true" config/warext-global.yml
+
+            # Seed an inventory NBT payload before the feature-enabled restart.
+            rm -f console.lazy-seed.pipe
+            mkfifo console.lazy-seed.pipe
+            exec 4<>console.lazy-seed.pipe
+            java -Dwarext.profile=balanced -Xms768M -Xmx1024M -jar server.jar nogui <console.lazy-seed.pipe >lazy-seed.log 2>&1 &
+            SEED_PID=$!
+            for i in $(seq 1 90); do
+              grep -q "Done (" lazy-seed.log && break
+              kill -0 "$SEED_PID" 2>/dev/null || { cat lazy-seed.log; exit 1; }
+              sleep 1
+            done
+            grep -q "Done (" lazy-seed.log || { cat lazy-seed.log; exit 1; }
+            echo "setblock 0 4 0 minecraft:chest" >&4
+            echo "item replace block 0 4 0 container.0 with minecraft:stone 1" >&4
+            echo "save-all flush" >&4
+            sleep 3
+            echo "stop" >&4
+            for i in $(seq 1 30); do
+              kill -0 "$SEED_PID" 2>/dev/null || break
+              sleep 1
+            done
+            kill -0 "$SEED_PID" 2>/dev/null && { cat lazy-seed.log; kill "$SEED_PID" || true; exit 1; }
+            wait "$SEED_PID" || true
+            exec 4>&-
+
+            # Restart with the saved chest present. Startup exercises lazy NBT retention;
+            # the item command then forces first-access decode through the container API.
+            rm -f console.lazy.pipe
+            mkfifo console.lazy.pipe
+            exec 5<>console.lazy.pipe
+            java -Dwarext.profile=balanced -Xms768M -Xmx1024M -jar server.jar nogui <console.lazy.pipe >lazy-container.log 2>&1 &
+            LAZY_PID=$!
+            for i in $(seq 1 90); do
+              grep -q "Done (" lazy-container.log && break
+              kill -0 "$LAZY_PID" 2>/dev/null || { cat lazy-container.log; exit 1; }
+              sleep 1
+            done
+            grep -q "Done (" lazy-container.log || { cat lazy-container.log; exit 1; }
+            grep -q "ContainerItemLazyLoading.lazyContainerItemLoading" lazy-container.log || {
+              echo "Experimental deferred-container module was not enabled"
+              cat lazy-container.log
+              exit 1
+            }
+            echo "item replace block 0 4 0 container.1 with minecraft:dirt 1" >&5
+            echo "save-all flush" >&5
+            sleep 3
+            if grep -Eq "Exception|ERROR|Failed to load|Failed to save" lazy-container.log; then
+              echo "Deferred-container smoke emitted an error"
+              cat lazy-container.log
+              exit 1
+            fi
+            echo "stop" >&5
+            for i in $(seq 1 30); do
+              kill -0 "$LAZY_PID" 2>/dev/null || break
+              sleep 1
+            done
+            kill -0 "$LAZY_PID" 2>/dev/null && { cat lazy-container.log; kill "$LAZY_PID" || true; exit 1; }
+            wait "$LAZY_PID" || true
+            exec 5>&-
+            grep "Done (" lazy-container.log | tail -n 1
             cd ..
           }
 
           run_smoke balanced 25569
           run_smoke extreme 25570
+          run_lazy_container_smoke
 
       - name: Remove legacy product-branded prereleases
         if: github.ref == 'refs/heads/main'
