@@ -4949,6 +4949,195 @@ print("[ok] compact uniform PalettedContainer storage")
 print("Stage 28: chunk-section compact bit-storage optimization applied.")
 
 
+
+# 42) Experimental direct ticking-chunk set lookups port.
+# Adapted from Moonrise/Leaf PR #946 (0323). Keep the normal holder status path as a
+# fallback; do not activate the alternative fast path until explicitly enabled.
+direct_config = '''package org.dreeam.leaf.config.modules.opt;
+
+import org.dreeam.leaf.config.ConfigCategory;
+import org.dreeam.leaf.config.ConfigModule;
+import org.dreeam.leaf.config.annotations.Experimental;
+
+public class DirectTickingChunkLookup extends ConfigModule {
+    public String basePath() {
+        return ConfigCategory.PERF.basePath() + ".chunk.direct-ticking-set-lookups";
+    }
+
+    @Experimental
+    public static boolean enabled = false;
+
+    @Override
+    public void onLoaded() {
+        enabled = globalConfig.getBoolean(
+            basePath() + ".enabled",
+            enabled,
+            globalConfig.pickStringRegionBased(
+                "Experimental Moonrise primitive-long ticking-chunk lookup cache; disabled by default.",
+                "实验性的 Moonrise 区块 ticking 状态直接查找缓存；默认关闭。"
+            )
+        );
+    }
+}
+'''
+write("leaf-server/src/main/java/org/dreeam/leaf/config/modules/opt/DirectTickingChunkLookup.java", direct_config)
+
+def warext$moonrise_file(subpath):
+    choices = (
+        "leaf-server/src/minecraft/java/" + subpath,
+        "paper-server/src/main/java/" + subpath,
+        "leaf-server/src/main/java/" + subpath,
+    )
+    for choice in choices:
+        if (root / choice).is_file():
+            return choice
+    raise RuntimeError("Moonrise generated source not found: " + subpath)
+
+manager = warext$moonrise_file("ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java")
+holder = warext$moonrise_file("ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java")
+
+# The cache is maintained whenever chunk-holder status changes, independently of the
+# configuration flag; this permits safe config reloads (no stale empty cache on enable).
+insert_after_once(
+    manager,
+    """        this.chunkHolders.remove(position);
+""",
+    """        // Warext - clear cached ticking states when a holder is removed.
+        final long warext$position = holder.getCachedLongPos();
+        this.warext$blockTickingChunks.remove(warext$position);
+        this.warext$entityTickingChunks.remove(warext$position);
+""",
+    "clear ticking sets on holder removal",
+)
+
+insert_before = """    public enum TicketOperationType {"""
+manager_data = read(manager)
+if manager_data.count(insert_before) != 1:
+    raise RuntimeError(f"Moonrise manager methods anchor: expected 1, got {manager_data.count(insert_before)}")
+manager_code = """    // Warext - experimental direct ticking-set lookups.
+    private final it.unimi.dsi.fastutil.longs.LongSet warext$blockTickingChunks =
+        new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+    private final it.unimi.dsi.fastutil.longs.LongSet warext$entityTickingChunks =
+        new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+
+    public void warext$updateTickingSets(final NewChunkHolder holder, final net.minecraft.server.level.FullChunkStatus status) {
+        final long key = holder.getCachedLongPos();
+        if (status.isOrAfter(net.minecraft.server.level.FullChunkStatus.BLOCK_TICKING)) {
+            this.warext$blockTickingChunks.add(key);
+        } else {
+            this.warext$blockTickingChunks.remove(key);
+        }
+        if (status.isOrAfter(net.minecraft.server.level.FullChunkStatus.ENTITY_TICKING)) {
+            this.warext$entityTickingChunks.add(key);
+        } else {
+            this.warext$entityTickingChunks.remove(key);
+        }
+    }
+
+    public boolean warext$isBlockTicking(final long key) {
+        return this.warext$blockTickingChunks.contains(key);
+    }
+
+    public boolean warext$isEntityTicking(final long key) {
+        return this.warext$entityTickingChunks.contains(key);
+    }
+
+"""
+write(manager, manager_data.replace(insert_before, manager_code + insert_before, 1))
+
+replace_once(
+    holder,
+    """    public final ChunkHolder vanillaChunkHolder;""",
+    """    public final ChunkHolder vanillaChunkHolder;
+    private final long warext$chunkKey;
+
+    public long getCachedLongPos() {
+        return this.warext$chunkKey;
+    }""",
+    "cache holder primitive chunk coordinate",
+)
+replace_once(
+    holder,
+    """        this.chunkZ = chunkZ;
+        this.scheduler = scheduler;""",
+    """        this.chunkZ = chunkZ;
+        this.scheduler = scheduler;
+        this.warext$chunkKey = ((long) chunkZ << 32) | (chunkX & 0xFFFFFFFFL);""",
+    "initialize holder cached coordinate",
+)
+replace_once(
+    holder,
+    """        this.currentFullChunkStatus = to;""",
+    """        this.currentFullChunkStatus = to;
+        // Status updates are performed by the Moonrise tick-thread lifecycle.
+        this.world.moonrise$getChunkTaskScheduler().chunkHolderManager.warext$updateTickingSets(this, to);""",
+    "update ticking sets on holder state transitions",
+)
+
+dm = "leaf-server/src/minecraft/java/net/minecraft/server/level/DistanceManager.java"
+replace_once(
+    dm,
+    """        return chunkHolder != null && chunkHolder.isEntityTickingReady();""",
+    """        return org.dreeam.leaf.config.modules.opt.DirectTickingChunkLookup.enabled
+            ? this.moonrise$getChunkHolderManager().warext$isEntityTicking(key)
+            : chunkHolder != null && chunkHolder.isEntityTickingReady();""",
+    "experimental direct DistanceManager entity ticking lookup",
+)
+replace_once(
+    dm,
+    """        return chunkHolder != null && chunkHolder.isTickingReady();""",
+    """        return org.dreeam.leaf.config.modules.opt.DirectTickingChunkLookup.enabled
+            ? this.moonrise$getChunkHolderManager().warext$isBlockTicking(key)
+            : chunkHolder != null && chunkHolder.isTickingReady();""",
+    "experimental direct DistanceManager block ticking lookup",
+)
+
+chunk_cache = "leaf-server/src/minecraft/java/net/minecraft/server/level/ServerChunkCache.java"
+replace_once(
+    chunk_cache,
+    """        return newChunkHolder != null && newChunkHolder.isTickingReady();""",
+    """        return org.dreeam.leaf.config.modules.opt.DirectTickingChunkLookup.enabled
+            ? ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)this.level).moonrise$getChunkTaskScheduler().chunkHolderManager.warext$isBlockTicking(chunkKey)
+            : newChunkHolder != null && newChunkHolder.isTickingReady();""",
+    "experimental direct ServerChunkCache block ticking lookup",
+)
+
+server_level = "leaf-server/src/minecraft/java/net/minecraft/server/level/ServerLevel.java"
+level_data = read(server_level)
+level_rewrites = [
+    (
+        """        return holder != null && holder.isTickingReady();""",
+        """        return org.dreeam.leaf.config.modules.opt.DirectTickingChunkLookup.enabled
+            ? this.moonrise$getChunkTaskScheduler().chunkHolderManager.warext$isBlockTicking(chunkPos)
+            : holder != null && holder.isTickingReady();""",
+        "ServerLevel shouldTickBlocksAt",
+    ),
+    (
+        """        return chunkHolder != null && chunkHolder.isTickingReady();""",
+        """        return org.dreeam.leaf.config.modules.opt.DirectTickingChunkLookup.enabled
+            ? this.moonrise$getChunkTaskScheduler().chunkHolderManager.warext$isBlockTicking(key)
+            : chunkHolder != null && chunkHolder.isTickingReady();""",
+        "ServerLevel block ticking with entities loaded",
+    ),
+    (
+        """        return chunkHolder != null && chunkHolder.isEntityTickingReady();""",
+        """        return org.dreeam.leaf.config.modules.opt.DirectTickingChunkLookup.enabled
+            ? this.moonrise$getChunkTaskScheduler().chunkHolderManager.warext$isEntityTicking(
+                ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkKey(pos))
+            : chunkHolder != null && chunkHolder.isEntityTickingReady();""",
+        "ServerLevel entity ticking",
+    ),
+]
+for old,new,label in level_rewrites:
+    if level_data.count(old) != 1:
+        raise RuntimeError(f"{label}: expected 1, got {level_data.count(old)}")
+    level_data = level_data.replace(old,new,1)
+write(server_level, level_data)
+
+print("[ok] opt-in Moonrise direct ticking-set lookups with original holder fallback")
+print("Stage 29: experimental chunk ticking set cache applied.")
+
+
 # 35) Product-facing Warext Server Engine branding.
 # Keep upstream package/class names where compatibility requires them, but do not expose the
 # upstream project name as the product identity in runtime brand, commands, config headers,
