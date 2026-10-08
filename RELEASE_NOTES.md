@@ -1,41 +1,29 @@
-# Warext Server Engine 26.3 exp.18
+# Warext Server Engine 26.3 exp.19
 
-Experimental high-performance server engine build for the 26.3 line.
+Experimental high-performance Minecraft server engine build for the 26.3 line.
 
-## Compact uniform chunk-section bit storage
-- Add `performance.memory.compact-bit-storage.enabled`.
-- Enabled by default.
-- When a deserialized chunk section uses more than one palette bit but every stored palette index is zero, collapse it back to the uniform 0-bit representation.
-- Preserve the exact logical palette value at index 0.
-- Leave malformed or unknown palette data in its original decoded representation instead of forcing compaction.
-- Run Paper/Moonrise palette-read bookkeeping after any compaction so existing chunk read optimizations stay correct.
-- No biome, block, world-generation or chunk scheduling decisions are changed.
+## Experimental Moonrise direct ticking-chunk lookups
+- Add `performance.chunk.direct-ticking-set-lookups.enabled`, **disabled by default**.
+- Maintain primitive-long block-ticking and entity-ticking chunk position sets from Moonrise chunk-holder status transitions.
+- Remove entries whenever a chunk holder is removed, preventing stale ticking status.
+- When enabled, short-circuit the DistanceManager, ServerChunkCache and ServerLevel ticking-range checks before the usual chunk-holder map lookup.
+- When disabled, retain the original Paper/Moonrise holder-based lookup behavior.
+- Populate the optional lookup sets only while enabled. Restart after changing this option.
+- The experimental cache requires correct main-tick-thread use of the Moonrise lifecycle; it is not yet recommended for a busy public production server without stress testing.
 
-The optimization is independently adapted from the compact-bit-storage idea used by ModernFix and reviewed in Leaf PR #946.
+This adapts the core idea of "Moonrise: Direct Set Lookups for Ticking Chunks" from the unmerged Leaf PR #946; it is **not** a blanket port of that PR.
 
-## Why this matters
-Empty or single-value chunk sections can otherwise retain unnecessary long-array bit storage after deserialization. On large pregenerated worlds this wastes heap and increases GC pressure even though every cell resolves to the same palette value.
+## Testing
+- Build the runnable Paperclip JAR.
+- Smoke-test `balanced`, `extreme`, and `pregeneration` profiles.
+- Validate deferred-container loading, distant End worldgen, and normal-world Aquifer/compact-palette save-reload.
+- Explicitly enable the experimental direct ticking cache in a separate server boot; force-load and release a distant chunk ticket, save and shut down.
+- Validate real startup, chunk ticket command completion, no exception/corruption logs and clean shutdown.
+- Publish the release JAR, SHA256 sums and pinned upstream revision only after all CI checks pass.
 
-## Validation
-- Balanced real-server smoke boot.
-- Extreme real-server smoke boot.
-- Pregeneration real-server smoke boot.
-- Distant End worldgen smoke.
-- Normal noise-world Aquifer smoke with fixed seed `8675309`.
-- Saved Overworld chunk `[32,32]` is flushed to disk.
-- The same world is restarted and the saved chunk is force-loaded again, exercising real `PalettedContainer.read()` deserialization with compact-bit-storage enabled.
-- Reload must save and stop without palette, bit-storage, corruption or chunk-load errors.
-- Deferred-container chest NBT restart/decode smoke remains mandatory.
-- Runnable Paperclip JAR build and GitHub Release JAR verification remain mandatory.
+## Compatibility
+- Current Leaf `ver/26.3` base: `0edc7f3b7d79b0e2e16a0ed1df8278c02c73537f`.
+- No newer upstream 26.3 commit was available at the time of this release.
+- Previous experimental optimizations remain present without changing their defaults.
 
-## Existing pregeneration stack retained
-- 4-vCPU worker policy.
-- Bounded chunk NBT pending-write pressure control.
-- XYZ/sampler-safe End biome cache.
-- Vanilla-equivalent Aquifer center precompute.
-- Deferred container item decoding remains opt-in.
-
-## Upstream base
-- Leaf 26.3 remains pinned at `0edc7f3b7d79b0e2e16a0ed1df8278c02c73537f`; no newer `ver/26.3` commit was available when this release was prepared.
-
-This release remains a prerelease while the Leaf 26.3 line is still being stabilized.
+This is a prerelease. A CI smoke test is not a full-world gameplay parity or sustained 4-vCPU benchmark.
