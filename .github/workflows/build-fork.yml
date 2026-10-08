@@ -427,11 +427,65 @@ jobs:
             cd ..
           }
 
+          run_direct_ticking_lookup_smoke() {
+            cd smoke-balanced
+            grep -A8 "direct-ticking-set-lookups:" config/warext-global.yml | grep -q "enabled: false" || {
+              echo "Direct ticking-set lookup feature should be disabled by default"
+              grep -A10 -n "direct-ticking-set-lookups:" config/warext-global.yml || true
+              exit 1
+            }
+            sed -i '/direct-ticking-set-lookups:/,+6s/enabled: false/enabled: true/' config/warext-global.yml
+            grep -A8 "direct-ticking-set-lookups:" config/warext-global.yml | grep -q "enabled: true" || exit 1
+
+            rm -f console.direct.pipe
+            mkfifo console.direct.pipe
+            exec 8<>console.direct.pipe
+            java -Dwarext.profile=balanced -Xms768M -Xmx1024M -jar server.jar nogui <console.direct.pipe >direct-ticking.log 2>&1 &
+            DIRECT_PID=$!
+            for i in $(seq 1 90); do
+              grep -q "Done (" direct-ticking.log && break
+              kill -0 "$DIRECT_PID" 2>/dev/null || { cat direct-ticking.log; exit 1; }
+              sleep 1
+            done
+            grep -q "Done (" direct-ticking.log || { cat direct-ticking.log; exit 1; }
+            echo "forceload add 256 256" >&8
+            sleep 6
+            echo "save-all flush" >&8
+            sleep 2
+            echo "forceload remove 256 256" >&8
+            sleep 4
+            kill -0 "$DIRECT_PID" 2>/dev/null || { cat direct-ticking.log; exit 1; }
+            grep -q "Marked chunk \\[16, 16\\]" direct-ticking.log || {
+              echo "Ticket transition test did not load the intended chunk"
+              cat direct-ticking.log
+              exit 1
+            }
+            if grep -Eiq "Exception|Failed to load|Failed to save|ConcurrentModificationException" direct-ticking.log; then
+              echo "Experimental ticking-set cache test emitted an error"
+              cat direct-ticking.log
+              exit 1
+            fi
+            echo "stop" >&8
+            for i in $(seq 1 30); do
+              kill -0 "$DIRECT_PID" 2>/dev/null || break
+              sleep 1
+            done
+            kill -0 "$DIRECT_PID" 2>/dev/null && {
+              cat direct-ticking.log
+              kill "$DIRECT_PID" || true
+              exit 1
+            }
+            wait "$DIRECT_PID" || true
+            exec 8>&-
+            cd ..
+          }
+
           run_smoke balanced 25569
           run_smoke extreme 25570
           run_smoke pregeneration 25571
           run_aquifer_worldgen_smoke
           run_lazy_container_smoke
+          run_direct_ticking_lookup_smoke
 
       - name: Remove legacy product-branded prereleases
         if: github.ref == 'refs/heads/main'
