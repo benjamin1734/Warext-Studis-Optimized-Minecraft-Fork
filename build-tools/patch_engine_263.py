@@ -4982,7 +4982,7 @@ public class DirectTickingChunkLookup extends ConfigModule {
 '''
 write("leaf-server/src/main/java/org/dreeam/leaf/config/modules/opt/DirectTickingChunkLookup.java", direct_config)
 
-def warext$moonrise_file(subpath):
+def warext_moonrise_file(subpath):
     choices = (
         "leaf-server/src/minecraft/java/" + subpath,
         "paper-server/src/main/java/" + subpath,
@@ -4993,11 +4993,10 @@ def warext$moonrise_file(subpath):
             return choice
     raise RuntimeError("Moonrise generated source not found: " + subpath)
 
-manager = warext$moonrise_file("ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java")
-holder = warext$moonrise_file("ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java")
+manager = warext_moonrise_file("ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java")
+holder = warext_moonrise_file("ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java")
 
-# The cache is maintained whenever chunk-holder status changes, independently of the
-# configuration flag; this permits safe config reloads (no stale empty cache on enable).
+# Populate only when enabled. Changing this experimental setting requires a restart.
 insert_after_once(
     manager,
     """        this.chunkHolders.remove(position);
@@ -5021,6 +5020,9 @@ manager_code = """    // Warext - experimental direct ticking-set lookups.
         new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
 
     public void warext$updateTickingSets(final NewChunkHolder holder, final net.minecraft.server.level.FullChunkStatus status) {
+        if (!org.dreeam.leaf.config.modules.opt.DirectTickingChunkLookup.enabled) {
+            return;
+        }
         final long key = holder.getCachedLongPos();
         if (status.isOrAfter(net.minecraft.server.level.FullChunkStatus.BLOCK_TICKING)) {
             this.warext$blockTickingChunks.add(key);
