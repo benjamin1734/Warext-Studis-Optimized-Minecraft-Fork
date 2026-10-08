@@ -5076,65 +5076,69 @@ replace_once(
     "update ticking sets on holder state transitions",
 )
 
+# Short-circuit before the expensive holder map lookup when the experimental feature
+# is active. Disabled mode continues through the exact original Paper/Moonrise method.
 dm = "leaf-server/src/minecraft/java/net/minecraft/server/level/DistanceManager.java"
-replace_once(
+insert_after_once(
     dm,
-    """        return chunkHolder != null && chunkHolder.isEntityTickingReady();""",
-    """        return org.dreeam.leaf.config.modules.opt.DirectTickingChunkLookup.enabled
-            ? this.moonrise$getChunkHolderManager().warext$isEntityTicking(key)
-            : chunkHolder != null && chunkHolder.isEntityTickingReady();""",
-    "experimental direct DistanceManager entity ticking lookup",
+    "    public boolean inEntityTickingRange(final long key) {\n",
+    """        if (org.dreeam.leaf.config.modules.opt.DirectTickingChunkLookup.enabled) {
+            return this.moonrise$getChunkHolderManager().warext$isEntityTicking(key);
+        }
+""",
+    "direct DistanceManager entity ticking hot path",
 )
-replace_once(
+insert_after_once(
     dm,
-    """        return chunkHolder != null && chunkHolder.isTickingReady();""",
-    """        return org.dreeam.leaf.config.modules.opt.DirectTickingChunkLookup.enabled
-            ? this.moonrise$getChunkHolderManager().warext$isBlockTicking(key)
-            : chunkHolder != null && chunkHolder.isTickingReady();""",
-    "experimental direct DistanceManager block ticking lookup",
+    "    public boolean inBlockTickingRange(final long key) {\n",
+    """        if (org.dreeam.leaf.config.modules.opt.DirectTickingChunkLookup.enabled) {
+            return this.moonrise$getChunkHolderManager().warext$isBlockTicking(key);
+        }
+""",
+    "direct DistanceManager block ticking hot path",
 )
 
 chunk_cache = "leaf-server/src/minecraft/java/net/minecraft/server/level/ServerChunkCache.java"
-replace_once(
+insert_after_once(
     chunk_cache,
-    """        return newChunkHolder != null && newChunkHolder.isTickingReady();""",
-    """        return org.dreeam.leaf.config.modules.opt.DirectTickingChunkLookup.enabled
-            ? ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)this.level).moonrise$getChunkTaskScheduler().chunkHolderManager.warext$isBlockTicking(chunkKey)
-            : newChunkHolder != null && newChunkHolder.isTickingReady();""",
-    "experimental direct ServerChunkCache block ticking lookup",
+    "    public boolean isPositionTicking(final long chunkKey) {\n",
+    """        if (org.dreeam.leaf.config.modules.opt.DirectTickingChunkLookup.enabled) {
+            return ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)this.level)
+                .moonrise$getChunkTaskScheduler().chunkHolderManager.warext$isBlockTicking(chunkKey);
+        }
+""",
+    "direct ServerChunkCache block ticking hot path",
 )
 
 server_level = "leaf-server/src/minecraft/java/net/minecraft/server/level/ServerLevel.java"
-level_data = read(server_level)
-level_rewrites = [
-    (
-        """        return holder != null && holder.isTickingReady();""",
-        """        return org.dreeam.leaf.config.modules.opt.DirectTickingChunkLookup.enabled
-            ? this.moonrise$getChunkTaskScheduler().chunkHolderManager.warext$isBlockTicking(chunkPos)
-            : holder != null && holder.isTickingReady();""",
-        "ServerLevel shouldTickBlocksAt",
-    ),
-    (
-        """        return chunkHolder != null && chunkHolder.isTickingReady();""",
-        """        return org.dreeam.leaf.config.modules.opt.DirectTickingChunkLookup.enabled
-            ? this.moonrise$getChunkTaskScheduler().chunkHolderManager.warext$isBlockTicking(key)
-            : chunkHolder != null && chunkHolder.isTickingReady();""",
-        "ServerLevel block ticking with entities loaded",
-    ),
-    (
-        """        return chunkHolder != null && chunkHolder.isEntityTickingReady();""",
-        """        return org.dreeam.leaf.config.modules.opt.DirectTickingChunkLookup.enabled
-            ? this.moonrise$getChunkTaskScheduler().chunkHolderManager.warext$isEntityTicking(
-                ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkKey(pos))
-            : chunkHolder != null && chunkHolder.isEntityTickingReady();""",
-        "ServerLevel entity ticking",
-    ),
-]
-for old,new,label in level_rewrites:
-    if level_data.count(old) != 1:
-        raise RuntimeError(f"{label}: expected 1, got {level_data.count(old)}")
-    level_data = level_data.replace(old,new,1)
-write(server_level, level_data)
+insert_after_once(
+    server_level,
+    "    public boolean shouldTickBlocksAt(final long chunkPos) {\n",
+    """        if (org.dreeam.leaf.config.modules.opt.DirectTickingChunkLookup.enabled) {
+            return this.moonrise$getChunkTaskScheduler().chunkHolderManager.warext$isBlockTicking(chunkPos);
+        }
+""",
+    "direct ServerLevel shouldTickBlocksAt",
+)
+insert_after_once(
+    server_level,
+    "    public boolean isPositionTickingWithEntitiesLoaded(final long key) {\n",
+    """        if (org.dreeam.leaf.config.modules.opt.DirectTickingChunkLookup.enabled) {
+            return this.moonrise$getChunkTaskScheduler().chunkHolderManager.warext$isBlockTicking(key);
+        }
+""",
+    "direct ServerLevel block ticking with entities loaded",
+)
+insert_after_once(
+    server_level,
+    "    public boolean isPositionEntityTicking(final BlockPos pos) {\n",
+    """        if (org.dreeam.leaf.config.modules.opt.DirectTickingChunkLookup.enabled) {
+            return this.moonrise$getChunkTaskScheduler().chunkHolderManager.warext$isEntityTicking(
+                ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkKey(pos));
+        }
+""",
+    "direct ServerLevel entity ticking",
+)
 
 print("[ok] opt-in Moonrise direct ticking-set lookups with original holder fallback")
 print("Stage 29: experimental chunk ticking set cache applied.")
