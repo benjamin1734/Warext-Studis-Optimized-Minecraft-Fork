@@ -440,7 +440,7 @@ jobs:
             rm -f console.direct.pipe
             mkfifo console.direct.pipe
             exec 8<>console.direct.pipe
-            java -Dwarext.profile=balanced -Xms768M -Xmx1024M -jar server.jar nogui <console.direct.pipe >direct-ticking.log 2>&1 &
+            java -Dwarext.profile=balanced -Dwarext.debug.validate-ticking-sets=true -Xms768M -Xmx1024M -jar server.jar nogui <console.direct.pipe >direct-ticking.log 2>&1 &
             DIRECT_PID=$!
             for i in $(seq 1 90); do
               grep -q "Done (" direct-ticking.log && break
@@ -448,19 +448,28 @@ jobs:
               sleep 1
             done
             grep -q "Done (" direct-ticking.log || { cat direct-ticking.log; exit 1; }
+            # Exercise ticket activation/deactivation repeatedly, including negative
+            # coordinates. The debug mode independently compares cached membership
+            # against the live Moonrise holder readiness on every optimized lookup.
             echo "forceload add 256 256" >&8
+            echo "forceload add -256 -256" >&8
             sleep 6
             echo "save-all flush" >&8
             sleep 2
             echo "forceload remove 256 256" >&8
-            sleep 4
+            echo "forceload remove -256 -256" >&8
+            sleep 3
+            echo "forceload add 256 256" >&8
+            sleep 3
+            echo "forceload remove 256 256" >&8
+            sleep 3
             kill -0 "$DIRECT_PID" 2>/dev/null || { cat direct-ticking.log; exit 1; }
             grep -q "Marked chunk \\[16, 16\\]" direct-ticking.log || {
               echo "Ticket transition test did not load the intended chunk"
               cat direct-ticking.log
               exit 1
             }
-            if grep -Eiq "Exception|Failed to load|Failed to save|ConcurrentModificationException" direct-ticking.log; then
+            if grep -Eiq "Exception|Failed to load|Failed to save|ConcurrentModificationException|ticking state mismatch" direct-ticking.log; then
               echo "Experimental ticking-set cache test emitted an error"
               cat direct-ticking.log
               exit 1
