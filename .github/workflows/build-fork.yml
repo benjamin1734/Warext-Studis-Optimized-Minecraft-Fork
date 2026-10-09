@@ -74,7 +74,8 @@ jobs:
           run_smoke() {
             PROFILE="$1"
             PORT="$2"
-            DIR="smoke-$PROFILE"
+            CPU_TEST_LIMIT="${3:-}"
+            DIR="smoke-$PROFILE${CPU_TEST_LIMIT:+-cpu$CPU_TEST_LIMIT}"
 
             rm -rf "$DIR"
             mkdir -p "$DIR"
@@ -96,7 +97,11 @@ jobs:
 
             mkfifo console.pipe
             exec 3<>console.pipe
-            java -Dwarext.profile="$PROFILE" -Xms768M -Xmx1024M -jar server.jar nogui <console.pipe >server.log 2>&1 &
+            CPU_TEST_ARGS=()
+            if [ -n "$CPU_TEST_LIMIT" ]; then
+              CPU_TEST_ARGS=("-XX:ActiveProcessorCount=$CPU_TEST_LIMIT")
+            fi
+            java "${CPU_TEST_ARGS[@]}" -Dwarext.profile="$PROFILE" -Xms768M -Xmx1024M -jar server.jar nogui <console.pipe >server.log 2>&1 &
             PID=$!
             READY=0
 
@@ -144,6 +149,13 @@ jobs:
               cat server.log
               exit 1
             }
+            if [ -n "$CPU_TEST_LIMIT" ]; then
+              grep -Eq "detected cores: [1-$CPU_TEST_LIMIT][)]" server.log || {
+                echo "CPU-adaptive Moonrise worker policy did not respect the JVM-visible CPU limit"
+                grep -n "worker threads" server.log || true
+                exit 1
+              }
+            fi
 
             test -f config/warext-global.yml || {
               echo "Warext configuration file was not generated"
@@ -495,6 +507,10 @@ jobs:
           run_aquifer_worldgen_smoke
           run_lazy_container_smoke
           run_direct_ticking_lookup_smoke
+          # These are simulated CI CPU limits, not recommended host specifications.
+          # Exercise hardware-neutral defaults across distinct processor envelopes.
+          run_smoke compatibility 25573 2
+          run_smoke balanced 25574 8
 
       - name: Remove legacy product-branded prereleases
         if: github.ref == 'refs/heads/main'
