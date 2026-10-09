@@ -1893,22 +1893,22 @@ replace_once(
 
 print("Stage 9: shared adaptive multi-core CPU budget applied.")
 
-# VoxelBench AI tail-latency: on a 4-vCPU balanced host keep one steady pathfinding worker
-# but allow a second low-priority worker when the bounded queue saturates. This avoids immediately
-# pushing rejected CPU-heavy path work back onto the tick thread through CALLER_RUNS.
+# Profile- and hardware-adaptive steady/burst pathfinding. Reserve part of the shared
+# asynchronous worker budget for bursts without assuming any specific host CPU count.
 replace_once(
     "leaf-server/src/main/java/org/dreeam/leaf/async/path/AsyncPathProcessor.java",
     """    private static int getCorePoolSize() {
         return getMaxPoolSize();
     }""",
     """    private static int getCorePoolSize() {
-        if (!org.dreeam.leaf.performance.WarextPerformanceProfile.isExtreme()
-            && org.dreeam.leaf.performance.WarextCpuBudget.processors() <= 4) {
-            return Math.min(1, getMaxPoolSize());
+        final int maxWorkers = getMaxPoolSize();
+        if (org.dreeam.leaf.performance.WarextPerformanceProfile.isExtreme()) {
+            return maxWorkers;
         }
-        return getMaxPoolSize();
+        final int steadyBudget = Math.max(1, org.dreeam.leaf.performance.WarextCpuBudget.workerBudget() / 3);
+        return Math.max(1, Math.min(maxWorkers, steadyBudget));
     }""",
-    "4-vCPU balanced steady/burst pathfinding split",
+    "hardware-adaptive steady/burst pathfinding budget",
 )
 
 
@@ -4346,9 +4346,8 @@ print("Stage 23: opt-in deferred container item decoding applied.")
 
 
 # 37) Pregeneration-aware Moonrise chunk worker policy.
-# The vanilla Moonrise heuristic can resolve to a single generation worker on a 4-vCPU host.
-# Warext keeps manual Paper worker-thread settings authoritative, but gives its profiles a
-# conservative CPU-aware default and adds a dedicated pregeneration/Chunky mode.
+# Avoid assumptions about user hardware. Use JVM-visible processors and Moonrise's
+# physical-core detection, preserve explicit Paper worker settings and profile scaling.
 profile_file = "leaf-server/src/main/java/org/dreeam/leaf/performance/WarextPerformanceProfile.java"
 replace_once(
     profile_file,
@@ -4437,7 +4436,7 @@ replace_once(
             return Math.max(1, Math.min(16, override));
         }
 
-        final int cores = Math.max(1, detectedCores);
+        final int cores = Math.max(1, Math.min(detectedCores, Runtime.getRuntime().availableProcessors()));
         if (MODE == Mode.COMPATIBILITY) {
             int workers = cores / 2;
             if (workers <= 4) {
@@ -4448,25 +4447,13 @@ replace_once(
             return Math.max(1, workers);
         }
 
-        if (cores <= 2) {
-            return 1;
-        }
-        if (cores <= 4) {
-            return MODE == Mode.BALANCED ? 2 : 3;
-        }
-        if (cores <= 6) {
-            return MODE == Mode.BALANCED ? 3 : 4;
-        }
-        if (cores <= 8) {
-            return MODE == Mode.BALANCED ? 4 : (MODE == Mode.PREGENERATION ? 6 : 5);
-        }
-
-        final int reserved = MODE == Mode.PREGENERATION
-            ? 1
-            : (cores >= 24 ? 5 : (cores >= 16 ? 4 : 2));
-        final int usable = Math.max(2, cores - reserved);
-        final int numerator = MODE == Mode.BALANCED ? 55 : (MODE == Mode.PREGENERATION ? 80 : 70);
-        return Math.max(2, Math.min(16, (usable * numerator + 99) / 100));
+        // Use a fraction of the cores visible to this JVM and always reserve tick-thread
+        // headroom. No special-case values for any particular VPS/server size.
+        final int reserved = Math.min(cores - 1, Math.max(1, (cores + 5) / 6));
+        final int usable = Math.max(1, cores - reserved);
+        final int sharePercent = MODE == Mode.BALANCED ? 45
+            : (MODE == Mode.PREGENERATION ? 75 : 60);
+        return Math.max(1, Math.min(16, (usable * sharePercent + 99) / 100));
     }""",
     "profile-aware chunk worker budget",
 )
@@ -4496,7 +4483,10 @@ replace_once(
         }
 
         final int ioThreads = Math.max(1, configIoThreads);""",
-    """        final int detectedCores = Math.max(1, OSNuma.getNativeInstance().getTotalCores());
+    """        final int detectedCores = Math.max(1, Math.min(
+            OSNuma.getNativeInstance().getTotalCores(),
+            Runtime.getRuntime().availableProcessors()
+        ));
         final String workerProperty = PlatformHooks.get().getBrand() + ".WorkerThreadCount";
         final Integer explicitWorkerProperty = Integer.getInteger(workerProperty);
 
@@ -5037,11 +5027,29 @@ manager_code = """    // Warext - experimental direct ticking-set lookups.
     }
 
     public boolean warext$isBlockTicking(final long key) {
-        return this.warext$blockTickingChunks.contains(key);
+        final boolean cached = this.warext$blockTickingChunks.contains(key);
+        if (Boolean.getBoolean("warext.debug.validate-ticking-sets")) {
+            final NewChunkHolder live = this.getChunkHolder(key);
+            final boolean expected = live != null && live.isTickingReady();
+            if (cached != expected) {
+                throw new IllegalStateException("Block-ticking state mismatch at chunk " + key
+                    + ": cached=" + cached + ", actual=" + expected);
+            }
+        }
+        return cached;
     }
 
     public boolean warext$isEntityTicking(final long key) {
-        return this.warext$entityTickingChunks.contains(key);
+        final boolean cached = this.warext$entityTickingChunks.contains(key);
+        if (Boolean.getBoolean("warext.debug.validate-ticking-sets")) {
+            final NewChunkHolder live = this.getChunkHolder(key);
+            final boolean expected = live != null && live.isEntityTickingReady();
+            if (cached != expected) {
+                throw new IllegalStateException("Entity-ticking state mismatch at chunk " + key
+                    + ": cached=" + cached + ", actual=" + expected);
+            }
+        }
+        return cached;
     }
 
 """
